@@ -1,134 +1,157 @@
-"""Append-only activity ledger with Ed25519-signed entries."""
+"""Local signed activity log stored in SQLite."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from protocol import generate_ed25519_keypair, new_id, sign_payload, utc_now, verify_signature
+from nacl.signing import SigningKey
+
+from protocol import sign
 
 
-class ActivityLedger:
-    def __init__(self, db_path: str = "nexus.db") -> None:
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+JsonDict = Dict[str, Any]
+AgentKey = Union[str, Tuple[str, str], Dict[str, str]]
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _public_from_private(private_key: str) -> str:
+    return SigningKey(bytes.fromhex(private_key)).verify_key.encode().hex()
+
+
+def _resolve_keys(agent_key: AgentKey) -> Tuple[str, str]:
+    if isinstance(agent_key, tuple) and len(agent_key) == 2:
+        private_key, public_key = agent_key
+        return str(private_key), str(public_key)
+
+    if isinstance(agent_key, dict):
+        private_key = str(agent_key.get("private_key", ""))
+        public_key = str(agent_key.get("public_key", ""))
+        if private_key and not public_key:
+            public_key = _public_from_private(private_key)
+        if not private_key or not public_key:
+            raise ValueError("agent_key dict must contain private_key and public_key")
+        return private_key, public_key
+
+    if isinstance(agent_key, str):
+        private_key = agent_key
+        return private_key, _public_from_private(private_key)
+
+    raise TypeError("agent_key must be private key string, (private, public), or key dict")
+
+
+def _resolve_counterparty(counterparty_key: Optional[AgentKey]) -> Optional[str]:
+    if counterparty_key is None:
+        return None
+    if isinstance(counterparty_key, tuple) and len(counterparty_key) == 2:
+        return str(counterparty_key[1])
+    if isinstance(counterparty_key, dict):
+        public_key = str(counterparty_key.get("public_key", ""))
+        if public_key:
+            return public_key
+        private_key = str(counterparty_key.get("private_key", ""))
+        return _public_from_private(private_key) if private_key else None
+    return str(counterparty_key)
+
+
+class Ledger:
+    def __init__(self, path: str = "nexus.db") -> None:
+        self.path = path
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        private_key, public_key = generate_ed25519_keypair()
-        self._signing_key = private_key
-        self.public_key = public_key
-        self._init_schema()
+        self._init_db()
 
-    def _init_schema(self) -> None:
+    def _init_db(self) -> None:
         self._conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS activity_ledger (
-                entry_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
+                agent_pubkey TEXT NOT NULL,
+                counterparty_pubkey TEXT,
                 event_type TEXT NOT NULL,
-                agent_id TEXT,
-                status TEXT NOT NULL,
-                tx_signature TEXT,
-                proof_hash TEXT,
-                payload_json TEXT NOT NULL,
-                signature TEXT NOT NULL,
-                signer_public_key TEXT NOT NULL
+                data_json TEXT NOT NULL,
+                signature TEXT NOT NULL
             )
             """
         )
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_ledger(timestamp)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_event ON activity_ledger(event_type)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_ledger(agent_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_agent ON ledger(agent_pubkey)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_timestamp ON ledger(timestamp)")
         self._conn.commit()
 
-    def append(
+    def log(
         self,
+        agent_key: AgentKey,
         event_type: str,
-        payload: Dict[str, Any],
-        *,
-        agent_id: Optional[str] = None,
-        status: str = "ok",
-        tx_signature: Optional[str] = None,
-        proof_hash: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        entry = {
-            "entry_id": new_id("entry"),
-            "timestamp": utc_now(),
-            "event_type": str(event_type).strip(),
-            "agent_id": agent_id,
-            "status": str(status).strip() or "ok",
-            "tx_signature": tx_signature,
-            "proof_hash": proof_hash,
-            "payload": payload,
-        }
-        signature = sign_payload(entry, self._signing_key)
-        entry["signature"] = signature
-        entry["signer_public_key"] = self.public_key
+        data: JsonDict,
+        counterparty_key: Optional[AgentKey] = None,
+    ) -> JsonDict:
+        private_key, public_key = _resolve_keys(agent_key)
+        counterparty_pubkey = _resolve_counterparty(counterparty_key)
+        timestamp = _utc_timestamp()
 
-        self._conn.execute(
+        signed_payload: JsonDict = {
+            "timestamp": timestamp,
+            "agent_pubkey": public_key,
+            "counterparty_pubkey": counterparty_pubkey,
+            "event_type": str(event_type),
+            "data": data,
+        }
+        signature = sign(private_key, signed_payload)
+
+        cur = self._conn.execute(
             """
-            INSERT INTO activity_ledger (
-                entry_id, timestamp, event_type, agent_id, status, tx_signature,
-                proof_hash, payload_json, signature, signer_public_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ledger (
+                timestamp, agent_pubkey, counterparty_pubkey, event_type, data_json, signature
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                entry["entry_id"],
-                entry["timestamp"],
-                entry["event_type"],
-                entry["agent_id"],
-                entry["status"],
-                entry["tx_signature"],
-                entry["proof_hash"],
-                json.dumps(entry["payload"]),
+                timestamp,
+                public_key,
+                counterparty_pubkey,
+                str(event_type),
+                json.dumps(data, sort_keys=True),
                 signature,
-                self.public_key,
             ),
         )
         self._conn.commit()
-        return dict(entry)
 
-    def all(self) -> List[Dict[str, Any]]:
+        return {
+            "id": int(cur.lastrowid),
+            "timestamp": timestamp,
+            "agent_pubkey": public_key,
+            "counterparty_pubkey": counterparty_pubkey,
+            "event_type": str(event_type),
+            "data_json": json.dumps(data, sort_keys=True),
+            "signature": signature,
+        }
+
+    def all(self) -> List[JsonDict]:
         rows = self._conn.execute(
             """
-            SELECT entry_id, timestamp, event_type, agent_id, status, tx_signature,
-                   proof_hash, payload_json, signature, signer_public_key
-            FROM activity_ledger
-            ORDER BY timestamp
+            SELECT id, timestamp, agent_pubkey, counterparty_pubkey, event_type, data_json, signature
+            FROM ledger
+            ORDER BY id ASC
             """
         ).fetchall()
+        return [dict(row) for row in rows]
 
-        entries: List[Dict[str, Any]] = []
-        for row in rows:
-            entry = {
-                "entry_id": str(row["entry_id"]),
-                "timestamp": str(row["timestamp"]),
-                "event_type": str(row["event_type"]),
-                "agent_id": row["agent_id"],
-                "status": str(row["status"]),
-                "tx_signature": row["tx_signature"],
-                "proof_hash": row["proof_hash"],
-                "payload": json.loads(str(row["payload_json"])),
-                "signature": str(row["signature"]),
-                "signer_public_key": str(row["signer_public_key"]),
-            }
-            signable = {
-                "entry_id": entry["entry_id"],
-                "timestamp": entry["timestamp"],
-                "event_type": entry["event_type"],
-                "agent_id": entry["agent_id"],
-                "status": entry["status"],
-                "tx_signature": entry["tx_signature"],
-                "proof_hash": entry["proof_hash"],
-                "payload": entry["payload"],
-            }
-            entry["verified"] = verify_signature(signable, entry["signature"], entry["signer_public_key"])
-            entries.append(entry)
-        return entries
-
-    def export_json(self) -> str:
-        return json.dumps(self.all(), indent=2, sort_keys=True)
+    def by_agent(self, public_key: str) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, timestamp, agent_pubkey, counterparty_pubkey, event_type, data_json, signature
+            FROM ledger
+            WHERE agent_pubkey = ?
+            ORDER BY id ASC
+            """,
+            (public_key,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def close(self) -> None:
         self._conn.close()
