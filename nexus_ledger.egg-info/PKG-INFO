@@ -1,0 +1,89 @@
+Metadata-Version: 2.4
+Name: nexus-ledger
+Version: 2.0.1
+Summary: Pure sign + log + anchor library for agent proof
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: pynacl>=1.5.0
+Provides-Extra: solana
+Requires-Dist: solders>=0.21.0; extra == "solana"
+Requires-Dist: solana>=0.35.0; extra == "solana"
+Provides-Extra: test
+Requires-Dist: pytest>=8.0.0; extra == "test"
+Dynamic: license-file
+
+# Nexus Ledger — Signed proof that your agents did the work
+
+Built by Mercury & Vickson of Vickson Enterprises ☿️
+
+Nexus Ledger is a pure sign + log + anchor library.
+
+```python
+from nexus_ledger import Agent
+
+agent = Agent("Mercury")
+agent.log("delivered_research", {"topic": "market analysis"})
+tx = agent.anchor({"task": "research", "result": "complete"})
+```
+
+## Core model
+
+- keypair = identity
+- signature = proof
+- Solana memo anchor = permanent record
+
+No server needed. No registration. No financial features.
+
+## Install
+
+```bash
+pip install nexus-ledger
+```
+
+**If that doesn't work:**
+
+| Problem | Fix |
+|---------|-----|
+| `command not found: pip` | Try `pip3 install nexus-ledger` |
+| Still not found | Try `python3 -m pip install nexus-ledger` |
+| "externally managed environment" | Try `python3 -m pip install nexus-ledger --user` |
+| Still stuck | `python3 -m venv .venv && source .venv/bin/activate && pip install nexus-ledger` |
+
+**Requirements:** Python 3.10+. That's it.
+
+Optional — for on-chain proof anchoring on Solana:
+
+```bash
+pip install nexus-ledger[solana]
+```
+
+## Full example
+
+```python
+from nexus_ledger import Agent
+
+agent_a = Agent("Mercury")
+agent_b = Agent("Iris")
+
+agent_a.log("delivered_research", {"topic": "market analysis"}, counterparty=agent_b)
+
+tx = agent_a.anchor({"task": "research", "result": "complete"})
+assert agent_a.verify({"task": "research", "result": "complete"}, tx["hash"])
+
+print(agent_a.history())
+```
+
+## Demo
+
+```bash
+python demo.py
+python demo.py --mainnet
+```
+
+- default mode is mock anchoring
+- `--mainnet` sends real SPL Memo anchors to Solana mainnet-beta
+
+## License
+
+Business Source License 1.1 (BSL 1.1). See [LICENSE](LICENSE).
