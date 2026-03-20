@@ -7,6 +7,7 @@ from ledger import Ledger
 from nexus_ledger import Agent
 from proof_anchor import anchor, hash as hash_proof, verify as verify_proof
 from protocol import generate_keypair, sign, verify
+from transport import FileTransport, pack_receipt, public_key_to_did, resolve_did, unpack_receipt
 
 
 def test_protocol_sign_and_verify() -> None:
@@ -158,3 +159,72 @@ def test_store_and_retrieve_receipts(tmp_path: Path) -> None:
     assert len(with_iris) == 1
     assert len(with_mercury) == 1
     assert with_iris[0]["proof_hash"] == stored_a["proof_hash"]
+
+
+def test_did_generation_from_ed25519_pubkey() -> None:
+    _, public_key = generate_keypair()
+    did = public_key_to_did(public_key)
+
+    assert did.startswith("did:key:z")
+
+
+def test_did_resolution_back_to_pubkey() -> None:
+    _, public_key = generate_keypair()
+    did = public_key_to_did(public_key)
+
+    assert resolve_did(did).hex() == public_key
+
+
+def test_envelope_pack_unpack_round_trip(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    sender = Agent("Sender", keys_dir=str(keys_dir), db_path=str(tmp_path / "sender.db"))
+    receiver = Agent("Receiver", keys_dir=str(keys_dir), db_path=str(tmp_path / "receiver.db"))
+
+    receipt = sender.create_receipt("delivered_research", {"result": "complete"}, receiver.public_key)
+    envelope = pack_receipt(receipt, sender.private_key)
+    unpacked = unpack_receipt(envelope, expected_sender_did=sender.did)
+
+    assert unpacked == receipt
+
+
+def test_file_transport_send_receive(tmp_path: Path) -> None:
+    transport = FileTransport()
+    path = tmp_path / "envelope.json"
+    envelope = json.dumps({"sender_did": "did:key:zTest", "signature": "abc", "payload": {"x": 1}})
+
+    written_path = transport.send(str(path), envelope)
+    received = transport.receive(written_path)
+
+    assert received == envelope
+
+
+def test_full_receipt_exchange_via_file_transport(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    agent_a = Agent("Agent-A", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
+    agent_b = Agent("Agent-B", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+    transport = FileTransport()
+
+    outbound_path = tmp_path / "outbound.json"
+    inbound_path = tmp_path / "return.json"
+
+    outbound_envelope = agent_a.send_receipt(
+        agent_b.did,
+        "delivered_research",
+        {"task_id": "T-42", "result": "complete"},
+        transport="file",
+        endpoint=str(outbound_path),
+    )
+
+    received_by_b = transport.receive(str(outbound_path))
+    countersigned = agent_b.receive_receipt(received_by_b)
+    return_envelope = pack_receipt(countersigned, agent_b.private_key)
+    transport.send(str(inbound_path), return_envelope)
+
+    received_by_a = transport.receive(str(inbound_path))
+    final_receipt = agent_a.receive_receipt(received_by_a)
+
+    assert outbound_envelope
+    assert agent_a.verify_receipt(final_receipt) is True
+    assert agent_b.verify_receipt(final_receipt) is True
+    assert len(agent_a._ledger.get_receipts()) == 1
+    assert len(agent_b._ledger.get_receipts()) == 1

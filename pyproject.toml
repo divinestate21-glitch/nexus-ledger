@@ -18,9 +18,13 @@ solana = [
   "solana>=0.35.0",
 ]
 
+transport = [
+  "aiohttp>=3.9.0",
+]
+
 test = [
   "pytest>=8.0.0",
 ]
 
 [tool.setuptools]
-py-modules = ["nexus_ledger", "protocol", "ledger", "proof_anchor"]
+py-modules = ["nexus_ledger", "protocol", "ledger", "proof_anchor", "transport"]

@@ -65,45 +65,53 @@ print(agent_a.history())
 python demo.py
 python demo.py --mainnet
 python exchange_demo.py
+python cross_machine_demo.py
 ```
 
 - default mode is mock anchoring
 - `--mainnet` sends real SPL Memo anchors to Solana mainnet-beta
 
-## Cross-Machine Receipts
+## Cross-Machine Usage
 
-Two agents sign the same receipt for a shared event. Agent A signs first, Agent B verifies and countersigns, and both keep a copy. Later, either side can verify both signatures and prove the transaction happened.
+Your keypair IS your identity. Your DID is your address.
 
-Flow:
+Each agent exposes a `did:key:z6Mk...` string derived directly from its Ed25519 public key. There is no registry and no central server.
+
+Machine A:
 
 ```python
 from nexus_ledger import Agent
 
-agent_a = Agent("Mercury-A")
-agent_b = Agent("Iris-B")
-
-receipt = agent_a.create_receipt(
-    "delivered_research",
-    {"task_id": "T-9001", "result": "complete"},
-    agent_b.public_key,
-)
-
-payload_to_b = agent_a.export_receipt(receipt)          # create -> export -> send
-from_a = agent_b.import_receipt(payload_to_b)
-signed_by_b = agent_b.countersign_receipt(from_a)       # countersign
-payload_to_a = agent_b.export_receipt(signed_by_b)      # send back
-final_receipt = agent_a.import_receipt(payload_to_a)
-
-assert agent_a.verify_receipt(final_receipt) is True    # verify
-assert agent_b.verify_receipt(final_receipt) is True
-
-agent_a.store_receipt(final_receipt)                    # store
-agent_b.store_receipt(final_receipt)
+agent = Agent("Machine-A")
+agent.start_listener(8765)
 ```
 
-The exchange format is plain JSON strings. You can send them over HTTP, WebSocket, files, email, Discord, or any other transport.
+Machine B:
 
-Two agents. Two machines. One unfakeable receipt.
+```python
+from nexus_ledger import Agent
+
+agent_b = Agent("Machine-B")
+agent_a_did = "did:key:z6Mk..."
+
+response_envelope = agent_b.send_receipt(
+    agent_a_did,
+    "delivered_research",
+    {"result": "complete"},
+    endpoint="http://machine-a:8765",
+)
+final_receipt = agent_b.receive_receipt(response_envelope)
+```
+
+`cross_machine_demo.py` supports both localhost simulation and real two-machine runs:
+
+```bash
+python cross_machine_demo.py
+python cross_machine_demo.py --listen 8765
+python cross_machine_demo.py --send 192.168.1.10:8765
+```
+
+No central server. No registration. Just two agents talking directly.
 
 ## License
 
