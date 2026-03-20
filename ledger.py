@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -22,6 +23,33 @@ def _utc_timestamp() -> str:
 
 def _public_from_private(private_key: str) -> str:
     return SigningKey(bytes.fromhex(private_key)).verify_key.encode().hex()
+
+
+def _canonical_json(data_dict: JsonDict) -> str:
+    return json.dumps(data_dict, sort_keys=True, separators=(",", ":"))
+
+
+def receipt_signing_payload(receipt: JsonDict) -> JsonDict:
+    return {
+        "timestamp": str(receipt["timestamp"]),
+        "event_type": str(receipt["event_type"]),
+        "data": receipt["data"],
+        "agent_a_pubkey": str(receipt["agent_a_pubkey"]),
+        "agent_b_pubkey": str(receipt["agent_b_pubkey"]),
+    }
+
+
+def receipt_proof_hash(receipt: JsonDict) -> str:
+    stored_payload = {
+        "timestamp": str(receipt["timestamp"]),
+        "event_type": str(receipt["event_type"]),
+        "data": receipt["data"],
+        "agent_a_pubkey": str(receipt["agent_a_pubkey"]),
+        "agent_a_signature": str(receipt["agent_a_signature"]),
+        "agent_b_pubkey": str(receipt["agent_b_pubkey"]),
+        "agent_b_signature": str(receipt["agent_b_signature"]),
+    }
+    return hashlib.sha256(_canonical_json(stored_payload).encode("utf-8")).hexdigest()
 
 
 def _resolve_keys(agent_key: AgentKey) -> Tuple[str, str]:
@@ -80,8 +108,26 @@ class Ledger:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                agent_a_pubkey TEXT NOT NULL,
+                agent_a_signature TEXT NOT NULL,
+                agent_b_pubkey TEXT NOT NULL,
+                agent_b_signature TEXT NOT NULL,
+                proof_hash TEXT NOT NULL
+            )
+            """
+        )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_agent ON ledger(agent_pubkey)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_timestamp ON ledger(timestamp)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_a ON receipts(agent_a_pubkey)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_b ON receipts(agent_b_pubkey)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_timestamp ON receipts(timestamp)")
         self._conn.commit()
 
     def log(
@@ -150,6 +196,113 @@ class Ledger:
             ORDER BY id ASC
             """,
             (public_key,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def store_receipt(self, receipt_dict: JsonDict) -> JsonDict:
+        required_fields = [
+            "timestamp",
+            "event_type",
+            "data",
+            "agent_a_pubkey",
+            "agent_a_signature",
+            "agent_b_pubkey",
+            "agent_b_signature",
+        ]
+        missing = [field for field in required_fields if field not in receipt_dict]
+        if missing:
+            raise ValueError(f"Receipt missing required fields: {', '.join(missing)}")
+
+        data = receipt_dict["data"]
+        if not isinstance(data, dict):
+            raise ValueError("receipt['data'] must be a dict")
+
+        normalized_receipt = {
+            "timestamp": str(receipt_dict["timestamp"]),
+            "event_type": str(receipt_dict["event_type"]),
+            "data": data,
+            "agent_a_pubkey": str(receipt_dict["agent_a_pubkey"]),
+            "agent_a_signature": str(receipt_dict["agent_a_signature"]),
+            "agent_b_pubkey": str(receipt_dict["agent_b_pubkey"]),
+            "agent_b_signature": str(receipt_dict["agent_b_signature"]),
+        }
+        proof_hash = str(receipt_dict.get("proof_hash") or receipt_proof_hash(normalized_receipt))
+
+        cur = self._conn.execute(
+            """
+            INSERT INTO receipts (
+                timestamp,
+                event_type,
+                data_json,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_receipt["timestamp"],
+                normalized_receipt["event_type"],
+                _canonical_json(data),
+                normalized_receipt["agent_a_pubkey"],
+                normalized_receipt["agent_a_signature"],
+                normalized_receipt["agent_b_pubkey"],
+                normalized_receipt["agent_b_signature"],
+                proof_hash,
+            ),
+        )
+        self._conn.commit()
+
+        return {
+            "id": int(cur.lastrowid),
+            "timestamp": normalized_receipt["timestamp"],
+            "event_type": normalized_receipt["event_type"],
+            "data_json": _canonical_json(data),
+            "agent_a_pubkey": normalized_receipt["agent_a_pubkey"],
+            "agent_a_signature": normalized_receipt["agent_a_signature"],
+            "agent_b_pubkey": normalized_receipt["agent_b_pubkey"],
+            "agent_b_signature": normalized_receipt["agent_b_signature"],
+            "proof_hash": proof_hash,
+        }
+
+    def get_receipts(self) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                event_type,
+                data_json,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            FROM receipts
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_receipts_with(self, counterparty_pubkey: str) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                event_type,
+                data_json,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            FROM receipts
+            WHERE agent_a_pubkey = ? OR agent_b_pubkey = ?
+            ORDER BY id ASC
+            """,
+            (counterparty_pubkey, counterparty_pubkey),
         ).fetchall()
         return [dict(row) for row in rows]
 

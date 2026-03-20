@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: nexus-ledger
-Version: 2.0.1
+Version: 2.1.0
 Summary: Pure sign + log + anchor library for agent proof
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
@@ -79,10 +79,46 @@ print(agent_a.history())
 ```bash
 python demo.py
 python demo.py --mainnet
+python exchange_demo.py
 ```
 
 - default mode is mock anchoring
 - `--mainnet` sends real SPL Memo anchors to Solana mainnet-beta
+
+## Cross-Machine Receipts
+
+Two agents sign the same receipt for a shared event. Agent A signs first, Agent B verifies and countersigns, and both keep a copy. Later, either side can verify both signatures and prove the transaction happened.
+
+Flow:
+
+```python
+from nexus_ledger import Agent
+
+agent_a = Agent("Mercury-A")
+agent_b = Agent("Iris-B")
+
+receipt = agent_a.create_receipt(
+    "delivered_research",
+    {"task_id": "T-9001", "result": "complete"},
+    agent_b.public_key,
+)
+
+payload_to_b = agent_a.export_receipt(receipt)          # create -> export -> send
+from_a = agent_b.import_receipt(payload_to_b)
+signed_by_b = agent_b.countersign_receipt(from_a)       # countersign
+payload_to_a = agent_b.export_receipt(signed_by_b)      # send back
+final_receipt = agent_a.import_receipt(payload_to_a)
+
+assert agent_a.verify_receipt(final_receipt) is True    # verify
+assert agent_b.verify_receipt(final_receipt) is True
+
+agent_a.store_receipt(final_receipt)                    # store
+agent_b.store_receipt(final_receipt)
+```
+
+The exchange format is plain JSON strings. You can send them over HTTP, WebSocket, files, email, Discord, or any other transport.
+
+Two agents. Two machines. One unfakeable receipt.
 
 ## License
 

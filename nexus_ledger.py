@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ledger import Ledger
+from ledger import Ledger, receipt_proof_hash, receipt_signing_payload
 from proof_anchor import anchor as anchor_proof
 from proof_anchor import verify as verify_proof
-from protocol import generate_keypair
+from protocol import generate_keypair, sign, verify
 
 
 class Agent:
@@ -70,3 +71,82 @@ class Agent:
 
     def all_activity(self) -> list[Dict[str, Any]]:
         return self._ledger.all()
+
+    def create_receipt(self, event_type: str, data: Dict[str, Any], counterparty_pubkey: str) -> Dict[str, Any]:
+        if not str(counterparty_pubkey).strip():
+            raise ValueError("counterparty_pubkey is required")
+        if not isinstance(data, dict):
+            raise ValueError("data must be a dict")
+
+        receipt: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": str(event_type),
+            "data": data,
+            "agent_a_pubkey": self.public_key,
+            "agent_b_pubkey": str(counterparty_pubkey),
+        }
+        receipt["agent_a_signature"] = sign(self.private_key, receipt_signing_payload(receipt))
+        return receipt
+
+    def countersign_receipt(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt must be a dict")
+
+        required_fields = [
+            "timestamp",
+            "event_type",
+            "data",
+            "agent_a_pubkey",
+            "agent_b_pubkey",
+            "agent_a_signature",
+        ]
+        missing = [field for field in required_fields if field not in receipt]
+        if missing:
+            raise ValueError(f"Receipt missing required fields: {', '.join(missing)}")
+
+        if str(receipt["agent_b_pubkey"]) != self.public_key:
+            raise ValueError("Receipt is not addressed to this agent")
+
+        payload = receipt_signing_payload(receipt)
+        if not verify(str(receipt["agent_a_pubkey"]), payload, str(receipt["agent_a_signature"])):
+            raise ValueError("Invalid agent A signature")
+
+        countersigned = dict(receipt)
+        countersigned["agent_b_signature"] = sign(self.private_key, payload)
+        return countersigned
+
+    def verify_receipt(self, receipt: Dict[str, Any]) -> bool:
+        required_fields = [
+            "timestamp",
+            "event_type",
+            "data",
+            "agent_a_pubkey",
+            "agent_b_pubkey",
+            "agent_a_signature",
+            "agent_b_signature",
+        ]
+        if not isinstance(receipt, dict):
+            return False
+        if any(field not in receipt for field in required_fields):
+            return False
+
+        payload = receipt_signing_payload(receipt)
+        agent_a_ok = verify(str(receipt["agent_a_pubkey"]), payload, str(receipt["agent_a_signature"]))
+        agent_b_ok = verify(str(receipt["agent_b_pubkey"]), payload, str(receipt["agent_b_signature"]))
+        return agent_a_ok and agent_b_ok
+
+    def store_receipt(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.verify_receipt(receipt):
+            raise ValueError("Cannot store invalid receipt")
+        receipt_to_store = dict(receipt)
+        receipt_to_store["proof_hash"] = receipt_proof_hash(receipt_to_store)
+        return self._ledger.store_receipt(receipt_to_store)
+
+    def export_receipt(self, receipt: Dict[str, Any]) -> str:
+        return json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+
+    def import_receipt(self, json_string: str) -> Dict[str, Any]:
+        receipt = json.loads(json_string)
+        if not isinstance(receipt, dict):
+            raise ValueError("Receipt JSON must decode to an object")
+        return receipt

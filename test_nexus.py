@@ -78,3 +78,83 @@ def test_agent_flow(tmp_path: Path, monkeypatch) -> None:
 
     mercury_key = json.loads((keys_dir / "mercury.json").read_text(encoding="utf-8"))
     assert mercury_key["public_key"] == mercury.public_key
+
+
+def test_create_receipt(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
+    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+
+    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
+
+    assert receipt["event_type"] == "delivered_research"
+    assert receipt["agent_a_pubkey"] == mercury.public_key
+    assert receipt["agent_b_pubkey"] == iris.public_key
+    assert "agent_a_signature" in receipt
+    assert "agent_b_signature" not in receipt
+
+
+def test_countersign_receipt(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
+    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+
+    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
+    countersigned = iris.countersign_receipt(receipt)
+
+    assert countersigned["agent_a_signature"] == receipt["agent_a_signature"]
+    assert "agent_b_signature" in countersigned
+    assert mercury.verify_receipt(countersigned) is True
+
+
+def test_verify_receipt_valid_and_invalid(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
+    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+
+    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
+    valid_receipt = iris.countersign_receipt(receipt)
+    assert mercury.verify_receipt(valid_receipt) is True
+    assert iris.verify_receipt(valid_receipt) is True
+
+    invalid_receipt = dict(valid_receipt)
+    invalid_receipt["data"] = {"task_id": "tampered"}
+    assert mercury.verify_receipt(invalid_receipt) is False
+
+
+def test_receipt_export_import_round_trip(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
+    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+
+    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
+    countersigned = iris.countersign_receipt(receipt)
+
+    encoded = iris.export_receipt(countersigned)
+    decoded = mercury.import_receipt(encoded)
+    assert decoded == countersigned
+    assert mercury.verify_receipt(decoded) is True
+
+
+def test_store_and_retrieve_receipts(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
+    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+
+    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
+    countersigned = iris.countersign_receipt(receipt)
+
+    stored_a = mercury.store_receipt(countersigned)
+    stored_b = iris.store_receipt(countersigned)
+    assert stored_a["proof_hash"] == stored_b["proof_hash"]
+
+    a_receipts = mercury._ledger.get_receipts()
+    b_receipts = iris._ledger.get_receipts()
+    assert len(a_receipts) == 1
+    assert len(b_receipts) == 1
+
+    with_iris = mercury._ledger.get_receipts_with(iris.public_key)
+    with_mercury = iris._ledger.get_receipts_with(mercury.public_key)
+    assert len(with_iris) == 1
+    assert len(with_mercury) == 1
+    assert with_iris[0]["proof_hash"] == stored_a["proof_hash"]
