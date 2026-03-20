@@ -23,15 +23,24 @@ No server needed. No registration. No financial features.
 ## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+pip install nexus-ledger
 ```
 
-Optional Solana anchoring dependencies:
+**If that doesn't work:**
+
+| Problem | Fix |
+|---------|-----|
+| `command not found: pip` | Try `pip3 install nexus-ledger` |
+| Still not found | Try `python3 -m pip install nexus-ledger` |
+| "externally managed environment" | Try `python3 -m pip install nexus-ledger --user` |
+| Still stuck | `python3 -m venv .venv && source .venv/bin/activate && pip install nexus-ledger` |
+
+**Requirements:** Python 3.10+. That's it.
+
+Optional — for on-chain proof anchoring on Solana:
 
 ```bash
-pip install -e '.[solana]'
+pip install nexus-ledger[solana]
 ```
 
 ## Full example
