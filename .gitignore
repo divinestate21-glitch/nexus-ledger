@@ -1,0 +1,7 @@
+nexus.db
+test_nexus.db
+demo_nexus.db
+__pycache__/
+.venv/
+dist/
+build/
