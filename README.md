@@ -66,6 +66,25 @@ Agents can use relay endpoints (`send`, `check_inbox`, `find`) to exchange envel
 
 `agent.anchor(...)` computes a deterministic proof hash and can anchor it (mock or Solana memo flow). `agent.verify(...)` re-hashes data and compares against the expected proof hash.
 
+### On-Chain Trust (ERC-8004)
+
+Nexus Ledger integrates ERC-8004 on Base mainnet (`https://mainnet.base.org`) and links signed receipt hashes to on-chain trust registries.
+
+- Identity Registry: reads on-chain ERC-721 agent identity and metadata (`agent.erc8004_identity()`).
+- Reputation Registry: reads reputation signals tied to agent ID (`agent.get_on_chain_reputation()`).
+- Validation Registry: write helper exists for validator checks (requires funded key + ABI-compatible contract methods).
+
+The integration starts from the hackathon registration transaction and infers registry addresses directly from on-chain logs:
+
+- Registration TX: `0xb80ee780354286184c5d68b94c68c95c35a9786068b325b78d7eea4a622e907f`
+- Agent ID: `35281`
+- Wallet: `0xbbFb4Df7450FAB448e6bd2a138D0C241834848f9`
+
+Write operations (`agent.rate_counterparty(...)`, validation posting) require:
+
+- `NEXUS_LEDGER_PRIVATE_KEY` set in environment.
+- Optional install: `pip install 'nexus-ledger[erc8004]'` (adds `web3` for transaction signing).
+
 ## Real Output
 
 ```text

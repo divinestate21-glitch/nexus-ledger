@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexus-ledger"
-version = "3.0.0"
+version = "3.1.0"
 description = "Pure sign + log + anchor library for agent proof"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -20,6 +20,10 @@ solana = [
 
 transport = [
   "aiohttp>=3.9.0",
+]
+
+erc8004 = [
+  "web3>=7.0.0",
 ]
 
 test = [

@@ -9,6 +9,13 @@ from typing import Any, Dict, Optional
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
+from .erc8004 import (
+    BASE_MAINNET_RPC,
+    HACKATHON_AGENT_ID,
+    HACKATHON_WALLET,
+    REGISTRATION_TX_HASH,
+    ERC8004,
+)
 from .ledger import Ledger, receipt_proof_hash, receipt_signing_payload
 from .proof_anchor import anchor as anchor_proof
 from .proof_anchor import verify as verify_proof
@@ -35,6 +42,10 @@ class Agent:
         keys_dir: str = "keys",
         db_path: str = "nexus.db",
         relay: str = DEFAULT_RELAY_URL,
+        erc8004_agent_id: int = HACKATHON_AGENT_ID,
+        erc8004_wallet: str = HACKATHON_WALLET,
+        erc8004_registration_tx: str = REGISTRATION_TX_HASH,
+        erc8004_rpc_url: str = BASE_MAINNET_RPC,
     ) -> None:
         clean_name = str(name).strip()
         if not clean_name:
@@ -48,6 +59,14 @@ class Agent:
         self._ledger = Ledger(path=db_path)
         self._listener_server = None
         self.relay = str(relay).strip() or DEFAULT_RELAY_URL
+        self.erc8004_agent_id = int(erc8004_agent_id)
+        self.erc8004_wallet = str(erc8004_wallet).strip() or HACKATHON_WALLET
+        self._erc8004 = ERC8004(
+            rpc_url=erc8004_rpc_url,
+            registration_tx_hash=erc8004_registration_tx,
+            default_agent_id=self.erc8004_agent_id,
+            default_wallet=self.erc8004_wallet,
+        )
         self._relay_available = False
         self._relay_timeout_seconds = 0.75
         self._register_on_relay_safely()
@@ -91,6 +110,18 @@ class Agent:
 
     def verify(self, data_dict: Dict[str, Any], expected_hash: str) -> bool:
         return verify_proof(data_dict, expected_hash)
+
+    def erc8004_identity(self) -> Dict[str, Any]:
+        return self._erc8004.get_agent_identity(self.erc8004_agent_id)
+
+    def rate_counterparty(self, receipt: Dict[str, Any], rating: int, comment: str) -> Dict[str, Any]:
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt must be a dict")
+        receipt_hash = receipt_proof_hash(receipt)
+        return self._erc8004.post_reputation(self.erc8004_agent_id, receipt_hash, rating, comment)
+
+    def get_on_chain_reputation(self) -> Dict[str, Any]:
+        return self._erc8004.get_reputation(self.erc8004_agent_id)
 
     def history(self) -> list[Dict[str, Any]]:
         return self._ledger.by_agent(self.public_key)

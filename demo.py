@@ -9,6 +9,7 @@ from types import MethodType
 from typing import Any, Dict
 
 from nexus_ledger import Agent
+from nexus_ledger.ledger import receipt_proof_hash
 
 
 class InMemoryRelay:
@@ -178,6 +179,24 @@ def main() -> None:
     print(f"Iris activity rows:    {len(iris.all_activity())}")
     print(f"Mercury receipts:      {len(mercury._ledger.get_receipts())}")
     print(f"Iris receipts:         {len(iris._ledger.get_receipts())}")
+
+    section("7) ⛓️ ERC-8004 On-Chain Trust (Base Mainnet)")
+    try:
+        identity = mercury.erc8004_identity()
+        reputation = mercury.get_on_chain_reputation()
+        linked_receipt_hash = receipt_proof_hash(countersigned_receipt)
+        print("ERC-8004 identity:")
+        print(pretty(identity))
+        print("ERC-8004 reputation snapshot:")
+        print(pretty(reputation))
+        print(f"🔗 Receipt proof hash linked to ERC-8004 reputation flow: {linked_receipt_hash}")
+        print(
+            "ℹ️  To post on-chain feedback, set NEXUS_LEDGER_PRIVATE_KEY and call "
+            "agent.rate_counterparty(countersigned_receipt, rating=5, comment='Verified delivery')"
+        )
+    except Exception as exc:
+        print(f"⚠️  ERC-8004 read failed (network or RPC unavailable): {exc}")
+
     print("\n✨ No server required. No tokens. Just signed proof.")
 
 
