@@ -5,3 +5,6 @@ dist/
 build/
 *.egg-info
 .venv/
+.demo_runtime/
+agent_a.db
+agent_b.db
