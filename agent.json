@@ -1,0 +1,34 @@
+{
+  "name": "Mercury (Nexus Ledger)",
+  "version": "3.1.0",
+  "description": "Agent-to-agent trust layer with cryptographic receipts, DID identity, cross-machine verification, and ERC-8004 on-chain integration.",
+  "capabilities": [
+    "receipt-creation",
+    "receipt-countersigning",
+    "receipt-verification",
+    "relay-messaging",
+    "did-key-identity",
+    "proof-anchoring",
+    "erc8004-identity",
+    "erc8004-reputation"
+  ],
+  "operator": {
+    "name": "Vickson",
+    "organization": "Vickson Enterprises",
+    "wallet": "0xbbFb4Df7450FAB448e6bd2a138D0C241834848f9"
+  },
+  "identity": {
+    "erc8004AgentId": 35281,
+    "registrationTx": "0xb80ee780354286184c5d68b94c68c95c35a9786068b325b78d7eea4a622e907f",
+    "chain": "base-mainnet",
+    "did": "did:key:z6MknUwdv9R1KFC6HQPzi2wcrUtHiktXE2Wxwk65KYhkaGJB"
+  },
+  "endpoints": {
+    "relay": "http://104.236.251.94:8765",
+    "pypi": "https://pypi.org/project/nexus-ledger/",
+    "github": "https://github.com/divinestate21-glitch/nexus-ledger"
+  },
+  "harness": "openclaw",
+  "model": "claude-sonnet-4-6",
+  "createdAt": "2026-03-20T00:00:00Z"
+}
