@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 
 from nacl.signing import SigningKey
 
-from protocol import sign, verify
+from .protocol import sign, verify
 
 
 JsonDict = Dict[str, Any]

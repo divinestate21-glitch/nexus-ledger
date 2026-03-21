@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from nacl.signing import SigningKey
 
-from protocol import sign
+from .protocol import sign
 
 
 JsonDict = Dict[str, Any]

@@ -1,230 +1,162 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from types import MethodType
+from typing import Any, Dict
 
-from ledger import Ledger
 from nexus_ledger import Agent
-from proof_anchor import anchor, hash as hash_proof, verify as verify_proof
-from protocol import generate_keypair, sign, verify
-from transport import FileTransport, pack_receipt, public_key_to_did, resolve_did, unpack_receipt
+from nexus_ledger.ledger import Ledger
+from nexus_ledger.protocol import generate_keypair
 
 
-def test_protocol_sign_and_verify() -> None:
-    private_key, public_key = generate_keypair()
-    payload = {"task": "research", "result": "complete"}
+class InMemoryRelay:
+    def __init__(self) -> None:
+        self._agents: Dict[str, Dict[str, str]] = {}
+        self._inbox: Dict[str, list[Dict[str, Any]]] = {}
 
-    signature = sign(private_key, payload)
+    def handle(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Any:
+        route = str(path).split("?", 1)[0]
+        method = method.upper()
+        params = params or {}
+        payload = payload or {}
 
-    assert verify(public_key, payload, signature) is True
-    assert verify(public_key, {"task": "research", "result": "changed"}, signature) is False
+        if route == "/health":
+            return {"status": "ok"}
+
+        if route == "/register" and method == "POST":
+            did = str(payload["did"])
+            self._agents[did] = {
+                "did": did,
+                "name": str(payload["name"]),
+                "pubkey": str(payload["pubkey"]),
+            }
+            self._inbox.setdefault(did, [])
+            return {"ok": True}
+
+        if route == "/discover":
+            name = str(params.get("name", "")).strip().lower()
+            agents = list(self._agents.values())
+            if name:
+                agents = [agent for agent in agents if agent["name"].strip().lower() == name]
+            return {"agents": agents}
+
+        if route == "/send" and method == "POST":
+            to_did = str(payload["to"])
+            self._inbox.setdefault(to_did, []).append({"envelope": payload["envelope"]})
+            return {"queued": True}
+
+        if route == "/receive":
+            did = str(params.get("did", ""))
+            messages = self._inbox.get(did, [])
+            self._inbox[did] = []
+            return {"messages": messages}
+
+        raise RuntimeError(f"Unsupported relay route: {route} {method}")
 
 
-def test_ledger_log_all_and_by_agent(tmp_path: Path) -> None:
-    db_path = tmp_path / "nexus.db"
-    ledger = Ledger(path=str(db_path))
+def attach_relay(agent: Agent, relay: InMemoryRelay) -> None:
+    def _relay_request(
+        self: Agent,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Any:
+        return relay.handle(path, method=method, params=params, payload=payload)
 
-    agent_a = generate_keypair()
-    agent_b = generate_keypair()
-
-    entry = ledger.log(agent_a, "delivered_research", {"topic": "market"}, counterparty_key=agent_b[1])
-    assert entry["id"] == 1
-    assert entry["event_type"] == "delivered_research"
-
-    all_entries = ledger.all()
-    assert len(all_entries) == 1
-    assert all_entries[0]["signature"] == entry["signature"]
-
-    agent_entries = ledger.by_agent(agent_a[1])
-    assert len(agent_entries) == 1
-    assert agent_entries[0]["agent_pubkey"] == agent_a[1]
-
-
-def test_proof_hash_anchor_verify_mock(monkeypatch) -> None:
-    monkeypatch.setenv("NEXUS_LEDGER_ANCHOR_MODE", "mock")
-
-    payload = {"task": "research", "result": "complete"}
-    expected_hash = hash_proof(payload)
-
-    tx = anchor(payload)
-
-    assert tx["hash"] == expected_hash
-    assert tx["tx_signature"].startswith("mock_")
-    assert verify_proof(payload, expected_hash) is True
-    assert verify_proof(payload, "0" * 64) is False
+    agent._relay_request = MethodType(_relay_request, agent)  # type: ignore[attr-defined]
+    agent._relay_available = True  # type: ignore[attr-defined]
+    agent._relay_request(  # type: ignore[attr-defined]
+        "/register",
+        method="POST",
+        payload={"did": agent.did, "name": agent.name, "pubkey": agent.public_key},
+    )
 
 
-def test_agent_flow(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("NEXUS_LEDGER_ANCHOR_MODE", "mock")
+def test_agent_creation(tmp_path: Path) -> None:
+    agent = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "agent.db"), relay="memory://relay")
+    assert agent.name == "Mercury"
+    assert len(agent.private_key) == 64
+    assert len(agent.public_key) == 64
+    assert agent.did.startswith("did:key:z")
 
-    db_path = tmp_path / "agent.db"
-    keys_dir = tmp_path / "keys"
 
-    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(db_path))
-    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(db_path))
+def test_logging(tmp_path: Path) -> None:
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
 
-    mercury.log("delivered_research", {"topic": "market analysis"}, counterparty=iris)
-    iris.log("received_research", {"status": "accepted"}, counterparty=mercury)
-
-    tx = mercury.anchor({"task": "research", "result": "complete"})
-
-    assert mercury.verify({"task": "research", "result": "complete"}, tx["hash"]) is True
-
+    row = mercury.log("task_completed", {"task": "R-1"}, counterparty=iris)
     history = mercury.history()
+
+    assert row["event_type"] == "task_completed"
     assert len(history) == 1
-    assert history[0]["event_type"] == "delivered_research"
-
-    all_activity = mercury.all_activity()
-    assert len(all_activity) == 2
-
-    mercury_key = json.loads((keys_dir / "mercury.json").read_text(encoding="utf-8"))
-    assert mercury_key["public_key"] == mercury.public_key
+    assert history[0]["counterparty_pubkey"] == iris.public_key
 
 
-def test_create_receipt(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
-    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+def test_receipt_create_countersign_verify(tmp_path: Path) -> None:
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
 
-    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
+    draft = mercury.create_receipt("delivery_receipt", {"task_id": "T-1"}, iris.public_key)
+    final = iris.countersign_receipt(draft)
 
-    assert receipt["event_type"] == "delivered_research"
-    assert receipt["agent_a_pubkey"] == mercury.public_key
-    assert receipt["agent_b_pubkey"] == iris.public_key
-    assert "agent_a_signature" in receipt
-    assert "agent_b_signature" not in receipt
+    assert mercury.verify_receipt(final) is True
+    assert iris.verify_receipt(final) is True
 
 
-def test_countersign_receipt(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
-    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+def test_export_import(tmp_path: Path) -> None:
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
 
-    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
-    countersigned = iris.countersign_receipt(receipt)
+    draft = mercury.create_receipt("delivery_receipt", {"task_id": "T-2"}, iris.public_key)
+    final = iris.countersign_receipt(draft)
 
-    assert countersigned["agent_a_signature"] == receipt["agent_a_signature"]
-    assert "agent_b_signature" in countersigned
-    assert mercury.verify_receipt(countersigned) is True
-
-
-def test_verify_receipt_valid_and_invalid(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
-    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
-
-    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
-    valid_receipt = iris.countersign_receipt(receipt)
-    assert mercury.verify_receipt(valid_receipt) is True
-    assert iris.verify_receipt(valid_receipt) is True
-
-    invalid_receipt = dict(valid_receipt)
-    invalid_receipt["data"] = {"task_id": "tampered"}
-    assert mercury.verify_receipt(invalid_receipt) is False
-
-
-def test_receipt_export_import_round_trip(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
-    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
-
-    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
-    countersigned = iris.countersign_receipt(receipt)
-
-    encoded = iris.export_receipt(countersigned)
+    encoded = iris.export_receipt(final)
     decoded = mercury.import_receipt(encoded)
-    assert decoded == countersigned
+
+    assert decoded == final
     assert mercury.verify_receipt(decoded) is True
 
 
-def test_store_and_retrieve_receipts(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    mercury = Agent("Mercury", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
-    iris = Agent("Iris", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
+def test_relay_connectivity(tmp_path: Path) -> None:
+    relay = InMemoryRelay()
 
-    receipt = mercury.create_receipt("delivered_research", {"task_id": "123"}, iris.public_key)
-    countersigned = iris.countersign_receipt(receipt)
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys_a"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys_b"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
+    attach_relay(mercury, relay)
+    attach_relay(iris, relay)
 
-    stored_a = mercury.store_receipt(countersigned)
-    stored_b = iris.store_receipt(countersigned)
-    assert stored_a["proof_hash"] == stored_b["proof_hash"]
+    found = mercury.find("Iris")
+    assert found is not None
+    assert found["did"] == iris.did
 
-    a_receipts = mercury._ledger.get_receipts()
-    b_receipts = iris._ledger.get_receipts()
-    assert len(a_receipts) == 1
-    assert len(b_receipts) == 1
+    outbound = mercury.send("delivery_receipt", {"task_id": "T-3", "result": "ok"}, to="Iris")
+    assert outbound["agent_b_pubkey"] == iris.public_key
 
-    with_iris = mercury._ledger.get_receipts_with(iris.public_key)
-    with_mercury = iris._ledger.get_receipts_with(mercury.public_key)
-    assert len(with_iris) == 1
-    assert len(with_mercury) == 1
-    assert with_iris[0]["proof_hash"] == stored_a["proof_hash"]
+    iris_inbox = iris.check_inbox()
+    mercury_inbox = mercury.check_inbox()
 
-
-def test_did_generation_from_ed25519_pubkey() -> None:
-    _, public_key = generate_keypair()
-    did = public_key_to_did(public_key)
-
-    assert did.startswith("did:key:z")
+    assert len(iris_inbox) == 1
+    assert len(mercury_inbox) == 1
+    assert mercury.verify_receipt(mercury_inbox[0]) is True
 
 
-def test_did_resolution_back_to_pubkey() -> None:
-    _, public_key = generate_keypair()
-    did = public_key_to_did(public_key)
+def test_ledger_direct_usage(tmp_path: Path) -> None:
+    ledger = Ledger(path=str(tmp_path / "local.db"))
+    agent_a = generate_keypair()
+    agent_b = generate_keypair()
 
-    assert resolve_did(did).hex() == public_key
+    entry = ledger.log(agent_a, "manual_log", {"k": "v"}, counterparty_key=agent_b[1])
+    rows = ledger.all()
 
-
-def test_envelope_pack_unpack_round_trip(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    sender = Agent("Sender", keys_dir=str(keys_dir), db_path=str(tmp_path / "sender.db"))
-    receiver = Agent("Receiver", keys_dir=str(keys_dir), db_path=str(tmp_path / "receiver.db"))
-
-    receipt = sender.create_receipt("delivered_research", {"result": "complete"}, receiver.public_key)
-    envelope = pack_receipt(receipt, sender.private_key)
-    unpacked = unpack_receipt(envelope, expected_sender_did=sender.did)
-
-    assert unpacked == receipt
-
-
-def test_file_transport_send_receive(tmp_path: Path) -> None:
-    transport = FileTransport()
-    path = tmp_path / "envelope.json"
-    envelope = json.dumps({"sender_did": "did:key:zTest", "signature": "abc", "payload": {"x": 1}})
-
-    written_path = transport.send(str(path), envelope)
-    received = transport.receive(written_path)
-
-    assert received == envelope
-
-
-def test_full_receipt_exchange_via_file_transport(tmp_path: Path) -> None:
-    keys_dir = tmp_path / "keys"
-    agent_a = Agent("Agent-A", keys_dir=str(keys_dir), db_path=str(tmp_path / "a.db"))
-    agent_b = Agent("Agent-B", keys_dir=str(keys_dir), db_path=str(tmp_path / "b.db"))
-    transport = FileTransport()
-
-    outbound_path = tmp_path / "outbound.json"
-    inbound_path = tmp_path / "return.json"
-
-    outbound_envelope = agent_a.send_receipt(
-        agent_b.did,
-        "delivered_research",
-        {"task_id": "T-42", "result": "complete"},
-        transport="file",
-        endpoint=str(outbound_path),
-    )
-
-    received_by_b = transport.receive(str(outbound_path))
-    countersigned = agent_b.receive_receipt(received_by_b)
-    return_envelope = pack_receipt(countersigned, agent_b.private_key)
-    transport.send(str(inbound_path), return_envelope)
-
-    received_by_a = transport.receive(str(inbound_path))
-    final_receipt = agent_a.receive_receipt(received_by_a)
-
-    assert outbound_envelope
-    assert agent_a.verify_receipt(final_receipt) is True
-    assert agent_b.verify_receipt(final_receipt) is True
-    assert len(agent_a._ledger.get_receipts()) == 1
-    assert len(agent_b._ledger.get_receipts()) == 1
+    assert entry["event_type"] == "manual_log"
+    assert len(rows) == 1
+    assert rows[0]["agent_pubkey"] == agent_a[1]

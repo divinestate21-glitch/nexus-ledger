@@ -1,10 +1,7 @@
-nexus.db
-test_nexus.db
-demo_nexus.db
+keys/
+*.db
 __pycache__/
-.venv/
 dist/
 build/
-keys/
-keys*/
-*.db
+*.egg-info
+.venv/

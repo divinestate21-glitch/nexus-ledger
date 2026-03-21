@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexus-ledger"
-version = "2.3.0"
+version = "3.0.0"
 description = "Pure sign + log + anchor library for agent proof"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -27,4 +27,4 @@ test = [
 ]
 
 [tool.setuptools]
-py-modules = ["nexus_ledger", "protocol", "ledger", "proof_anchor", "transport"]
+packages = ["nexus_ledger"]

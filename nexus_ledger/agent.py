@@ -9,11 +9,11 @@ from typing import Any, Dict, Optional
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
-from ledger import Ledger, receipt_proof_hash, receipt_signing_payload
-from proof_anchor import anchor as anchor_proof
-from proof_anchor import verify as verify_proof
-from protocol import generate_keypair, sign, verify
-from transport import (
+from .ledger import Ledger, receipt_proof_hash, receipt_signing_payload
+from .proof_anchor import anchor as anchor_proof
+from .proof_anchor import verify as verify_proof
+from .protocol import generate_keypair, sign, verify
+from .transport import (
     HTTPTransport,
     pack_receipt,
     public_key_to_did,
