@@ -66,6 +66,7 @@ python demo.py
 python demo.py --mainnet
 python exchange_demo.py
 python cross_machine_demo.py
+python relay_demo.py
 ```
 
 - default mode is mock anchoring
@@ -73,45 +74,19 @@ python cross_machine_demo.py
 
 ## Cross-Machine Usage
 
-Your keypair IS your identity. Your DID is your address.
-
-Each agent exposes a `did:key:z6Mk...` string derived directly from its Ed25519 public key. There is no registry and no central server.
-
-Machine A:
-
 ```python
 from nexus_ledger import Agent
 
-agent = Agent("Machine-A")
-agent.start_listener(8765)
+# Machine A
+mercury = Agent("Mercury")
+mercury.send("delivered_research", {"result": "complete"}, to="Iris")
+
+# Machine B
+iris = Agent("Iris")
+receipts = iris.check_inbox()
 ```
 
-Machine B:
-
-```python
-from nexus_ledger import Agent
-
-agent_b = Agent("Machine-B")
-agent_a_did = "did:key:z6Mk..."
-
-response_envelope = agent_b.send_receipt(
-    agent_a_did,
-    "delivered_research",
-    {"result": "complete"},
-    endpoint="http://machine-a:8765",
-)
-final_receipt = agent_b.receive_receipt(response_envelope)
-```
-
-`cross_machine_demo.py` supports both localhost simulation and real two-machine runs:
-
-```bash
-python cross_machine_demo.py
-python cross_machine_demo.py --listen 8765
-python cross_machine_demo.py --send 192.168.1.10:8765
-```
-
-No central server. No registration. Just two agents talking directly.
+Two machines. Three lines. No configuration.
 
 ## License
 

@@ -6,3 +6,6 @@ solana>=0.35.0
 
 [test]
 pytest>=8.0.0
+
+[transport]
+aiohttp>=3.9.0

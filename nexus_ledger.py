@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib import parse, request
+from urllib.error import HTTPError, URLError
 
 from ledger import Ledger, receipt_proof_hash, receipt_signing_payload
 from proof_anchor import anchor as anchor_proof
@@ -22,8 +24,18 @@ from transport import (
 )
 
 
+DEFAULT_RELAY_URL = "http://104.236.251.94:8765"
+
+
 class Agent:
-    def __init__(self, name: str, *, keys_dir: str = "keys", db_path: str = "nexus.db") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        keys_dir: str = "keys",
+        db_path: str = "nexus.db",
+        relay: str = DEFAULT_RELAY_URL,
+    ) -> None:
         clean_name = str(name).strip()
         if not clean_name:
             raise ValueError("Agent name is required")
@@ -35,6 +47,10 @@ class Agent:
         self.private_key, self.public_key = self._load_or_create_keys()
         self._ledger = Ledger(path=db_path)
         self._listener_server = None
+        self.relay = str(relay).strip() or DEFAULT_RELAY_URL
+        self._relay_available = False
+        self._relay_timeout_seconds = 0.75
+        self._register_on_relay_safely()
 
     def _key_file_path(self) -> Path:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in self.name).strip("_")
@@ -85,6 +101,216 @@ class Agent:
     @property
     def did(self) -> str:
         return public_key_to_did(self.public_key)
+
+    @property
+    def relay_online(self) -> bool:
+        return self._relay_available
+
+    def _register_on_relay_safely(self) -> None:
+        try:
+            self._relay_request(
+                "/register",
+                method="POST",
+                payload={"did": self.did, "name": self.name, "pubkey": self.public_key},
+            )
+            self._relay_available = True
+        except Exception:
+            try:
+                self._relay_request("/health")
+                self._relay_available = True
+            except Exception:
+                self._relay_available = False
+
+    def _relay_request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        base = self.relay.rstrip("/")
+        rel = path if path.startswith("/") else f"/{path}"
+        query = f"?{parse.urlencode(params)}" if params else ""
+        url = f"{base}{rel}{query}"
+
+        headers = {"Accept": "application/json"}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, sort_keys=True).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        req = request.Request(url, data=body, headers=headers, method=method.upper())
+        try:
+            with request.urlopen(req, timeout=self._relay_timeout_seconds) as response:
+                text = response.read().decode("utf-8").strip()
+        except (HTTPError, URLError, TimeoutError) as exc:
+            self._relay_available = False
+            raise RuntimeError(f"Relay request failed: {exc}") from exc
+
+        self._relay_available = True
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+    def _parse_discovery_response(self, payload: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(payload, dict) and "agents" in payload:
+            payload = payload["agents"]
+        if isinstance(payload, list):
+            if not payload:
+                return None
+            payload = payload[0]
+        if isinstance(payload, dict):
+            candidate = payload.get("agent")
+            if isinstance(candidate, dict):
+                payload = candidate
+            did = str(payload.get("did", "")).strip()
+            pubkey = str(payload.get("pubkey", payload.get("public_key", ""))).strip()
+            name = str(payload.get("name", "")).strip()
+            if did:
+                if not pubkey:
+                    pubkey = resolve_did(did).hex()
+                normalized = dict(payload)
+                normalized["did"] = did
+                normalized["name"] = name
+                normalized["pubkey"] = pubkey
+                return normalized
+        return None
+
+    def _extract_envelopes(self, payload: Any) -> list[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            if isinstance(payload.get("messages"), list):
+                items: list[Any] = payload["messages"]
+            elif isinstance(payload.get("envelopes"), list):
+                items = payload["envelopes"]
+            elif "envelope" in payload:
+                items = [payload["envelope"]]
+            elif all(key in payload for key in ("sender_did", "signature", "payload")):
+                items = [payload]
+            else:
+                items = []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+
+        envelopes: list[Dict[str, Any]] = []
+        for item in items:
+            candidate: Any = item.get("envelope") if isinstance(item, dict) and "envelope" in item else item
+            if isinstance(candidate, str):
+                try:
+                    candidate = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(candidate, dict) and all(k in candidate for k in ("sender_did", "signature", "payload")):
+                envelopes.append(candidate)
+        return envelopes
+
+    def find(self, name: str) -> Optional[Dict[str, Any]]:
+        query = str(name).strip()
+        if not query:
+            raise ValueError("Agent name is required")
+        if not self._relay_available:
+            return None
+        try:
+            payload = self._relay_request("/discover", params={"name": query})
+        except RuntimeError:
+            return None
+        return self._parse_discovery_response(payload)
+
+    def online_agents(self) -> list[Dict[str, Any]]:
+        if not self._relay_available:
+            return []
+        try:
+            payload = self._relay_request("/discover")
+        except RuntimeError:
+            return []
+
+        if isinstance(payload, dict) and isinstance(payload.get("agents"), list):
+            raw_agents = payload["agents"]
+        elif isinstance(payload, list):
+            raw_agents = payload
+        else:
+            raw_agents = []
+
+        result: list[Dict[str, Any]] = []
+        for item in raw_agents:
+            parsed = self._parse_discovery_response(item)
+            if parsed is not None:
+                result.append(parsed)
+        return result
+
+    def send(self, event_type: str, data: Dict[str, Any], *, to: str) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ValueError("data must be a dict")
+        if not self._relay_available:
+            raise RuntimeError("Relay is unavailable; agent is running in local-only mode")
+
+        target = str(to).strip()
+        if not target:
+            raise ValueError("Recipient name or DID is required")
+
+        if target.startswith("did:key:"):
+            recipient_did = target
+            recipient_pubkey = resolve_did(target).hex()
+        else:
+            found = self.find(target)
+            if found is None:
+                raise ValueError(f"Agent '{target}' not found on relay")
+            recipient_did = str(found["did"])
+            recipient_pubkey = str(found["pubkey"])
+
+        receipt = self.create_receipt(event_type, data, recipient_pubkey)
+        envelope = json.loads(pack_receipt(receipt, self.private_key))
+        self._relay_request("/send", method="POST", payload={"to": recipient_did, "envelope": envelope})
+        return receipt
+
+    def check_inbox(self) -> list[Dict[str, Any]]:
+        if not self._relay_available:
+            return []
+        try:
+            payload = self._relay_request("/receive", params={"did": self.did})
+        except RuntimeError:
+            return []
+
+        envelopes = self._extract_envelopes(payload)
+        processed: list[Dict[str, Any]] = []
+        for envelope in envelopes:
+            envelope_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+            sender_did = str(envelope.get("sender_did", "")).strip()
+
+            try:
+                receipt = unpack_receipt(envelope_json, expected_sender_did=sender_did or None)
+            except ValueError:
+                continue
+            if "agent_b_signature" in receipt:
+                if self.verify_receipt(receipt):
+                    self.store_receipt(receipt)
+                    processed.append(receipt)
+                continue
+
+            try:
+                countersigned = self.countersign_receipt(receipt)
+            except ValueError:
+                continue
+            self.store_receipt(countersigned)
+            processed.append(countersigned)
+
+            if sender_did:
+                response_envelope = json.loads(pack_receipt(countersigned, self.private_key))
+                try:
+                    self._relay_request(
+                        "/send",
+                        method="POST",
+                        payload={"to": sender_did, "envelope": response_envelope},
+                    )
+                except RuntimeError:
+                    continue
+
+        return processed
 
     def create_receipt(self, event_type: str, data: Dict[str, Any], counterparty_pubkey: str) -> Dict[str, Any]:
         if not str(counterparty_pubkey).strip():

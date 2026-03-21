@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: nexus-ledger
-Version: 2.1.0
+Version: 2.3.0
 Summary: Pure sign + log + anchor library for agent proof
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
@@ -9,6 +9,8 @@ Requires-Dist: pynacl>=1.5.0
 Provides-Extra: solana
 Requires-Dist: solders>=0.21.0; extra == "solana"
 Requires-Dist: solana>=0.35.0; extra == "solana"
+Provides-Extra: transport
+Requires-Dist: aiohttp>=3.9.0; extra == "transport"
 Provides-Extra: test
 Requires-Dist: pytest>=8.0.0; extra == "test"
 Dynamic: license-file
@@ -80,45 +82,28 @@ print(agent_a.history())
 python demo.py
 python demo.py --mainnet
 python exchange_demo.py
+python cross_machine_demo.py
+python relay_demo.py
 ```
 
 - default mode is mock anchoring
 - `--mainnet` sends real SPL Memo anchors to Solana mainnet-beta
 
-## Cross-Machine Receipts
-
-Two agents sign the same receipt for a shared event. Agent A signs first, Agent B verifies and countersigns, and both keep a copy. Later, either side can verify both signatures and prove the transaction happened.
-
-Flow:
+## Cross-Machine Usage
 
 ```python
 from nexus_ledger import Agent
 
-agent_a = Agent("Mercury-A")
-agent_b = Agent("Iris-B")
+# Machine A
+mercury = Agent("Mercury")
+mercury.send("delivered_research", {"result": "complete"}, to="Iris")
 
-receipt = agent_a.create_receipt(
-    "delivered_research",
-    {"task_id": "T-9001", "result": "complete"},
-    agent_b.public_key,
-)
-
-payload_to_b = agent_a.export_receipt(receipt)          # create -> export -> send
-from_a = agent_b.import_receipt(payload_to_b)
-signed_by_b = agent_b.countersign_receipt(from_a)       # countersign
-payload_to_a = agent_b.export_receipt(signed_by_b)      # send back
-final_receipt = agent_a.import_receipt(payload_to_a)
-
-assert agent_a.verify_receipt(final_receipt) is True    # verify
-assert agent_b.verify_receipt(final_receipt) is True
-
-agent_a.store_receipt(final_receipt)                    # store
-agent_b.store_receipt(final_receipt)
+# Machine B
+iris = Agent("Iris")
+receipts = iris.check_inbox()
 ```
 
-The exchange format is plain JSON strings. You can send them over HTTP, WebSocket, files, email, Discord, or any other transport.
-
-Two agents. Two machines. One unfakeable receipt.
+Two machines. Three lines. No configuration.
 
 ## License
 
