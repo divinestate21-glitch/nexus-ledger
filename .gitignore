@@ -8,3 +8,5 @@ build/
 .demo_runtime/
 agent_a.db
 agent_b.db
+.demo_runtime/
+web-demo/.vercel/
