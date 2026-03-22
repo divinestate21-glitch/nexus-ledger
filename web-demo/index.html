@@ -3,185 +3,259 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Relay Web Demo</title>
+  <title>Nexus Ledger Split Demo</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tweetnacl-util@0.15.1/nacl-util.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
   <style>
     :root {
       --bg: #0a0a0f;
-      --panel: rgba(18, 22, 34, 0.55);
-      --panel-border: rgba(103, 232, 249, 0.22);
-      --accent: #22d3ee;
-      --accent-2: #67e8f9;
-      --text: #e6f8ff;
-      --muted: #9db6c6;
-      --ok: #10b981;
-      --warn: #f59e0b;
-      --bad: #ef4444;
+      --panel: rgba(12, 18, 30, 0.58);
+      --glass-border: rgba(148, 163, 184, 0.16);
+      --text: #e6f5ff;
+      --muted: #93acc0;
+      --cyan: #22d3ee;
+      --purple: #a855f7;
+      --ok: #34d399;
+      --bad: #fb7185;
     }
 
-    html, body {
+    html,
+    body {
       min-height: 100%;
-      background: radial-gradient(circle at 15% 20%, rgba(34, 211, 238, 0.14), transparent 30%),
-                  radial-gradient(circle at 85% 80%, rgba(103, 232, 249, 0.12), transparent 26%),
-                  linear-gradient(140deg, #0a0a0f 0%, #0c111f 55%, #0a0a0f 100%);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(34, 211, 238, 0.2), transparent 36%),
+        radial-gradient(circle at 88% 86%, rgba(168, 85, 247, 0.22), transparent 38%),
+        linear-gradient(140deg, #080a10 0%, #0a0a0f 48%, #0d1220 100%);
       color: var(--text);
       font-family: Inter, sans-serif;
     }
 
     .glass {
       background: var(--panel);
-      border: 1px solid var(--panel-border);
-      backdrop-filter: blur(16px);
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    }
-
-    .accent {
-      color: var(--accent-2);
-    }
-
-    .pill {
-      border: 1px solid rgba(103, 232, 249, 0.25);
-      background: rgba(34, 211, 238, 0.08);
-    }
-
-    .btn-primary {
-      background: linear-gradient(90deg, rgba(34, 211, 238, 0.88), rgba(103, 232, 249, 0.88));
-      color: #031018;
-      font-weight: 700;
-    }
-
-    .btn-primary:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
-
-    .tiny {
-      font-size: 0.72rem;
-      line-height: 1.05rem;
-    }
-
-    .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+      border: 1px solid var(--glass-border);
+      backdrop-filter: blur(18px);
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
     }
 
     .input {
-      background: rgba(8, 14, 21, 0.7);
-      border: 1px solid rgba(103, 232, 249, 0.2);
+      width: 100%;
+      background: rgba(5, 10, 20, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 0.8rem;
+      padding: 0.62rem 0.78rem;
       color: var(--text);
+      font-size: 0.88rem;
+      line-height: 1.3;
     }
 
     .input:focus {
       outline: none;
-      border-color: rgba(34, 211, 238, 0.8);
-      box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.2);
+      border-color: rgba(34, 211, 238, 0.85);
+      box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.16);
+    }
+
+    .btn {
+      border-radius: 0.8rem;
+      padding: 0.62rem 0.9rem;
+      font-weight: 700;
+      font-size: 0.85rem;
+    }
+
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .btn-cyan {
+      background: linear-gradient(95deg, rgba(34, 211, 238, 0.92), rgba(103, 232, 249, 0.88));
+      color: #031119;
+    }
+
+    .btn-purple {
+      background: linear-gradient(95deg, rgba(168, 85, 247, 0.94), rgba(217, 70, 239, 0.88));
+      color: #12061f;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .tiny {
+      font-size: 0.74rem;
+      line-height: 1.06rem;
+    }
+
+    .card-a {
+      border-left: 3px solid rgba(34, 211, 238, 0.9);
+    }
+
+    .card-b {
+      border-left: 3px solid rgba(168, 85, 247, 0.92);
+    }
+
+    .float-glow {
+      position: absolute;
+      pointer-events: none;
+      filter: blur(44px);
+      opacity: 0.35;
     }
   </style>
 </head>
 <body class="p-4 md:p-8">
-  <div class="max-w-7xl mx-auto space-y-4">
+  <div class="relative max-w-7xl mx-auto space-y-4">
+    <div class="float-glow h-28 w-28 rounded-full bg-cyan-400 top-2 left-2"></div>
+    <div class="float-glow h-32 w-32 rounded-full bg-purple-500 bottom-8 right-10"></div>
+
     <header class="glass rounded-2xl p-5 md:p-6">
-      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
         <div>
-          <p class="uppercase tracking-[0.26em] text-cyan-300 tiny">Relay Demo</p>
-          <h1 class="text-3xl md:text-4xl font-black leading-tight">Agent Receipt Console</h1>
-          <p class="text-sm text-slate-300 mt-2">Relay: <span class="mono accent" id="relayUrl"></span></p>
+          <p class="uppercase tracking-[0.26em] text-cyan-300 tiny">Split Screen Live</p>
+          <h1 class="text-3xl md:text-4xl font-black leading-tight">Nexus Ledger — Live Demo</h1>
+          <p class="text-sm text-slate-300 mt-2">Two autonomous agents, one relay, signed receipts end-to-end.</p>
         </div>
-        <div class="flex flex-wrap gap-2 text-xs" id="statsBar"></div>
+        <div id="statsBar" class="flex flex-wrap gap-2"></div>
       </div>
     </header>
 
-    <main class="grid grid-cols-1 xl:grid-cols-12 gap-4">
-      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-4 space-y-4">
-        <h2 class="font-bold text-lg">Create Agent</h2>
-        <label class="block space-y-1">
-          <span class="text-sm text-slate-300">Agent Name</span>
-          <input id="agentName" class="input w-full rounded-xl px-3 py-2 text-sm" placeholder="Iris Node" />
-        </label>
-        <button id="createAgentBtn" class="btn-primary rounded-xl px-4 py-2 text-sm w-full">Generate Keys + DID + Register</button>
-        <div class="space-y-2 text-xs">
-          <div>
-            <p class="text-slate-300">DID</p>
-            <p id="myDid" class="mono break-all"></p>
+    <main class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <section class="glass card-a rounded-2xl p-4 md:p-5 space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-bold">Agent A</h2>
+          <span class="tiny text-cyan-200 border border-cyan-300/35 rounded-full px-2 py-0.5">🟢 Online</span> <button id="resetA" class="text-xs text-slate-400 hover:text-red-400 ml-2">⟲ Reset</button>
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-sm text-slate-300" for="nameA">Name</label>
+          <input id="nameA" class="input" placeholder="Mercury Core" />
+          <button id="createA" class="btn btn-cyan w-full">Create Agent A</button>
+          <p id="statusA" class="tiny text-slate-300"></p>
+        </div>
+
+        <div class="space-y-2">
+          <p class="tiny uppercase tracking-[0.2em] text-slate-400">Identity</p>
+          <div class="rounded-xl border border-cyan-400/25 bg-cyan-500/5 p-3 space-y-2">
+            <p class="tiny text-slate-300">DID</p>
+            <p id="didA" class="mono tiny break-all">Not created</p>
+            <p class="tiny text-slate-300">Public Key (base64)</p>
+            <p id="pubA" class="mono tiny break-all">Not created</p>
           </div>
-          <div>
-            <p class="text-slate-300">Public Key (base64)</p>
-            <p id="myPubKey" class="mono break-all"></p>
+        </div>
+
+        <div class="space-y-2">
+          <p class="tiny uppercase tracking-[0.2em] text-slate-400">Send Receipt</p>
+          <label class="text-sm text-slate-300" for="toA">To DID</label>
+          <input id="toA" class="input mono" placeholder="Auto-fills Agent B DID" />
+          <label class="text-sm text-slate-300" for="payloadA">Payload JSON</label>
+          <textarea id="payloadA" class="input mono min-h-[96px]">{"kind":"receipt","amount":1,"note":"Acknowledge from Agent A"}</textarea>
+          <button id="sendA" class="btn btn-cyan w-full">Send From A</button>
+        </div>
+
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <p class="tiny uppercase tracking-[0.2em] text-slate-400">Inbox A</p>
+            <span class="tiny text-slate-400"></span>
+          </div>
+          <div id="inboxA" class="space-y-2 max-h-[320px] overflow-auto pr-1"></div>
+        </div>
+      </section>
+
+      <section class="glass card-b rounded-2xl p-4 md:p-5 space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-bold">Agent B</h2>
+          <span class="tiny text-fuchsia-200 border border-fuchsia-300/35 rounded-full px-2 py-0.5">🟢 Online</span> <button id="resetB" class="text-xs text-slate-400 hover:text-red-400 ml-2">⟲ Reset</button>
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-sm text-slate-300" for="nameB">Name</label>
+          <input id="nameB" class="input" placeholder="Vickson Vertex" />
+          <button id="createB" class="btn btn-purple w-full">Create Agent B</button>
+          <p id="statusB" class="tiny text-slate-300"></p>
+        </div>
+
+        <div class="space-y-2">
+          <p class="tiny uppercase tracking-[0.2em] text-slate-400">Identity</p>
+          <div class="rounded-xl border border-purple-400/25 bg-purple-500/5 p-3 space-y-2">
+            <p class="tiny text-slate-300">DID</p>
+            <p id="didB" class="mono tiny break-all">Not created</p>
+            <p class="tiny text-slate-300">Public Key (base64)</p>
+            <p id="pubB" class="mono tiny break-all">Not created</p>
           </div>
         </div>
-      </section>
 
-      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-4 space-y-4">
-        <h2 class="font-bold text-lg">Send Receipt</h2>
-        <label class="block space-y-1">
-          <span class="text-sm text-slate-300">To (DID)</span>
-          <input id="toDid" class="input w-full rounded-xl px-3 py-2 text-sm mono" placeholder="did:key:z..." />
-        </label>
-        <label class="block space-y-1">
-          <span class="text-sm text-slate-300">Receipt Payload (JSON)</span>
-          <textarea id="receiptPayload" class="input w-full rounded-xl px-3 py-2 text-sm mono min-h-[120px]">{"kind":"receipt","amount":1,"note":"Ack"}</textarea>
-        </label>
-        <button id="sendBtn" class="btn-primary rounded-xl px-4 py-2 text-sm w-full">Sign + Send</button>
-        <p id="sendStatus" class="text-xs text-slate-300"></p>
-      </section>
-
-      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-4 space-y-3">
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="font-bold text-lg">Online Agents</h2>
-          <span class="tiny text-slate-300">polling `/discover`</span>
+        <div class="space-y-2">
+          <p class="tiny uppercase tracking-[0.2em] text-slate-400">Send Receipt</p>
+          <label class="text-sm text-slate-300" for="toB">To DID</label>
+          <input id="toB" class="input mono" placeholder="Auto-fills Agent A DID" />
+          <label class="text-sm text-slate-300" for="payloadB">Payload JSON</label>
+          <textarea id="payloadB" class="input mono min-h-[96px]">{"kind":"receipt","amount":1,"note":"Reply from Agent B"}</textarea>
+          <button id="sendB" class="btn btn-purple w-full">Send From B</button>
         </div>
-        <div id="agentsList" class="space-y-2 max-h-[360px] overflow-auto pr-1"></div>
-      </section>
 
-      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-12 space-y-3">
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="font-bold text-lg">Inbox</h2>
-          <span class="tiny text-slate-300">polling `/receive?did=...`</span>
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <p class="tiny uppercase tracking-[0.2em] text-slate-400">Inbox B</p>
+            <span class="tiny text-slate-400"></span>
+          </div>
+          <div id="inboxB" class="space-y-2 max-h-[320px] overflow-auto pr-1"></div>
         </div>
-        <div id="inboxList" class="space-y-2 max-h-[420px] overflow-auto pr-1"></div>
       </section>
     </main>
+
+    <footer class="glass rounded-2xl p-4 text-center text-xs text-slate-300">
+      Built by Mercury &amp; Vickson of Vickson Enterprises ☿️ | No tokens. No financial features. Just signed proof.
+    </footer>
   </div>
 
   <script>
-    const RELAY = "http://104.236.251.94:8765";
-    const state = {
-      keyPair: null,
-      did: "",
-      name: "",
-      pubkeyB64: "",
-      agents: [],
-      inbox: [],
+    // Fresh start on every page load
+    localStorage.removeItem("nexus_agent_a");
+    localStorage.removeItem("nexus_agent_b");
+    
+    const RELAY = "";
+    const STORE_A = "nexus_agent_a";
+    const STORE_B = "nexus_agent_b";
+    const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    const app = {
       health: null,
-      started: Date.now(),
-      pollTimer: null,
+      discovered: [],
+      healthTimer: null,
       inboxTimer: null,
+      agents: {
+        a: { key: "a", label: "A", storeKey: STORE_A, name: "", did: "", pubkeyB64: "", keyPair: null, inbox: [], seen: new Set() },
+        b: { key: "b", label: "B", storeKey: STORE_B, name: "", did: "", pubkeyB64: "", keyPair: null, inbox: [], seen: new Set() }
+      }
     };
 
     const el = {
-      relayUrl: document.getElementById("relayUrl"),
       statsBar: document.getElementById("statsBar"),
-      agentName: document.getElementById("agentName"),
-      createAgentBtn: document.getElementById("createAgentBtn"),
-      myDid: document.getElementById("myDid"),
-      myPubKey: document.getElementById("myPubKey"),
-      toDid: document.getElementById("toDid"),
-      receiptPayload: document.getElementById("receiptPayload"),
-      sendBtn: document.getElementById("sendBtn"),
-      sendStatus: document.getElementById("sendStatus"),
-      agentsList: document.getElementById("agentsList"),
-      inboxList: document.getElementById("inboxList"),
+      nameA: document.getElementById("nameA"),
+      nameB: document.getElementById("nameB"),
+      createA: document.getElementById("createA"),
+      createB: document.getElementById("createB"),
+      sendA: document.getElementById("sendA"),
+      sendB: document.getElementById("sendB"),
+      statusA: document.getElementById("statusA"),
+      statusB: document.getElementById("statusB"),
+      didA: document.getElementById("didA"),
+      didB: document.getElementById("didB"),
+      pubA: document.getElementById("pubA"),
+      pubB: document.getElementById("pubB"),
+      toA: document.getElementById("toA"),
+      toB: document.getElementById("toB"),
+      payloadA: document.getElementById("payloadA"),
+      payloadB: document.getElementById("payloadB"),
+      inboxA: document.getElementById("inboxA"),
+      inboxB: document.getElementById("inboxB")
     };
-
-    const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
     function base58Encode(bytes) {
       if (!bytes || !bytes.length) return "";
-      let digits = [0];
+      const digits = [0];
       for (let i = 0; i < bytes.length; i++) {
         let carry = bytes[i];
         for (let j = 0; j < digits.length; j++) {
@@ -196,30 +270,22 @@
       }
       let zeros = 0;
       while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
-      let result = "";
-      for (let i = 0; i < zeros; i++) result += "1";
-      for (let i = digits.length - 1; i >= 0; i--) result += BASE58_ALPHABET[digits[i]];
-      return result;
+      let out = "";
+      for (let i = 0; i < zeros; i++) out += "1";
+      for (let i = digits.length - 1; i >= 0; i--) out += BASE58_ALPHABET[digits[i]];
+      return out;
     }
 
-    function didFromEd25519PubKey(pubKeyUint8) {
+    function didFromPubKey(pubKey) {
       const prefix = new Uint8Array([0xed, 0x01]);
-      const prefixed = new Uint8Array(prefix.length + pubKeyUint8.length);
+      const prefixed = new Uint8Array(prefix.length + pubKey.length);
       prefixed.set(prefix, 0);
-      prefixed.set(pubKeyUint8, prefix.length);
+      prefixed.set(pubKey, prefix.length);
       return "did:key:z" + base58Encode(prefixed);
     }
 
-    function u8ToB64(u8) {
-      return nacl.util.encodeBase64(u8);
-    }
-
-    function b64ToU8(s) {
-      return nacl.util.decodeBase64(s);
-    }
-
-    function escapeHtml(s) {
-      return String(s)
+    function escapeHtml(value) {
+      return String(value)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -227,285 +293,404 @@
         .replace(/'/g, "&#039;");
     }
 
-    function formatAgo(ms) {
-      const sec = Math.floor(ms / 1000);
-      if (sec < 60) return sec + "s";
-      const min = Math.floor(sec / 60);
-      if (min < 60) return min + "m";
-      const hr = Math.floor(min / 60);
-      return hr + "h";
+    function toB64(bytes) {
+      return nacl.util.encodeBase64(bytes);
     }
 
-    function setSendStatus(msg, level = "info") {
-      const cls = level === "ok" ? "text-emerald-300" : level === "bad" ? "text-rose-300" : "text-slate-300";
-      el.sendStatus.className = "text-xs " + cls;
-      el.sendStatus.textContent = msg;
+    function fromB64(text) {
+      return nacl.util.decodeBase64(text);
     }
 
-    function statPill(label, value, tone = "default") {
-      const toneCls = tone === "ok"
-        ? "text-emerald-300 border-emerald-400/30 bg-emerald-400/10"
-        : tone === "bad"
-          ? "text-rose-300 border-rose-400/30 bg-rose-400/10"
-          : "text-cyan-200 border-cyan-400/30 bg-cyan-400/10";
-      return `<span class="pill ${toneCls} tiny rounded-full px-3 py-1">${label}: <span class="font-bold">${value}</span></span>`;
+    function setStatus(which, text, tone) {
+      const node = which === "a" ? el.statusA : el.statusB;
+      node.className = "tiny " + (tone === "ok" ? "text-emerald-300" : tone === "bad" ? "text-rose-300" : "text-slate-300");
+      node.textContent = text;
+    }
+
+    function normalizeDiscover(data) {
+      if (!data) return [];
+      if (Array.isArray(data.agents)) return data.agents;
+      if (Array.isArray(data)) return data;
+      return [];
     }
 
     function renderStats() {
-      const health = state.health || {};
-      const up = formatAgo(Date.now() - state.started);
-      const statusTone = health.status === "ok" || health.status === "healthy" ? "ok" : (health.status ? "bad" : "default");
+      const relayOk = app.health && (app.health.status === "ok" || app.health.status === "healthy");
+      const relayStatus = app.health ? (app.health.status || "unknown") : "unknown";
+      const pending = app.health && typeof app.health.pending_messages !== "undefined" ? app.health.pending_messages : "-";
+      const online = app.discovered.length || (app.agents.a.did ? 1 : 0) + (app.agents.b.did ? 1 : 0);
+
+      const pill = (label, value, tone) => {
+        const cls = tone === "ok"
+          ? "text-emerald-200 border-emerald-400/35 bg-emerald-400/12"
+          : tone === "bad"
+            ? "text-rose-200 border-rose-400/35 bg-rose-400/12"
+            : "text-cyan-100 border-cyan-400/35 bg-cyan-400/12";
+        return '<span class="tiny rounded-full px-3 py-1 border ' + cls + '">' + label + ': <span class="font-bold">' + escapeHtml(value) + "</span></span>";
+      };
+
       el.statsBar.innerHTML = [
-        statPill("Uptime", up),
-        statPill("Relay", health.status || "unknown", statusTone),
-        statPill("Registered", health.agents_registered ?? "-"),
-        statPill("Pending", health.pending_messages ?? "-"),
-        statPill("Discovered", state.agents.length),
-        statPill("Inbox", state.inbox.length),
+        pill("Relay", relayStatus, relayOk ? "ok" : (app.health ? "bad" : "default")),
+        pill("Agents Online", String(online), "default"),
+        pill("Pending", String(pending), "default")
       ].join("");
     }
 
-    function renderAgentIdentity() {
-      el.myDid.textContent = state.did || "Not created";
-      el.myPubKey.textContent = state.pubkeyB64 || "Not created";
+    function renderIdentity(which) {
+      const me = app.agents[which];
+      if (which === "a") {
+        el.didA.textContent = me.did || "Not created";
+        el.pubA.textContent = me.pubkeyB64 || "Not created";
+      } else {
+        el.didB.textContent = me.did || "Not created";
+        el.pubB.textContent = me.pubkeyB64 || "Not created";
+      }
     }
 
-    function renderAgents() {
-      if (!state.agents.length) {
-        el.agentsList.innerHTML = '<p class="text-sm text-slate-300">No agents discovered.</p>';
-        return;
-      }
-
-      el.agentsList.innerHTML = state.agents.map((a) => {
-        const self = a.did === state.did;
-        const cardTone = self ? "border-cyan-300/40 bg-cyan-400/10" : "border-cyan-900/40 bg-slate-900/30";
-        return `
-          <article class="rounded-xl border ${cardTone} p-3 space-y-1">
-            <div class="flex items-center justify-between gap-2">
-              <p class="font-semibold text-sm">${escapeHtml(a.name || "Unnamed")}</p>
-              ${self ? '<span class="tiny text-cyan-200 pill rounded-full px-2 py-0.5">You</span>' : ""}
-            </div>
-            <p class="mono tiny break-all text-cyan-100/90">${escapeHtml(a.did || "")}</p>
-            <p class="tiny text-slate-300 break-all">${escapeHtml(a.pubkey || "")}</p>
-            <div class="flex gap-2 pt-1">
-              <button data-did="${escapeHtml(a.did || "")}" class="pick-did tiny rounded-lg px-2 py-1 border border-cyan-400/30 hover:bg-cyan-500/10">Use DID</button>
-            </div>
-          </article>
-        `;
-      }).join("");
-
-      document.querySelectorAll(".pick-did").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          el.toDid.value = btn.getAttribute("data-did") || "";
-        });
-      });
+    function syncRecipientFields() {
+      el.toA.value = app.agents.b.did || "";
+      el.toB.value = app.agents.a.did || "";
     }
 
     function verifyEnvelope(envelope) {
       try {
-        const signatureB64 = envelope.signature;
-        const signerPubB64 = envelope.pubkey;
-        if (!signatureB64 || !signerPubB64) {
+        if (!envelope || !envelope.signature || !envelope.pubkey) {
           return { ok: false, reason: "missing signature or pubkey" };
         }
         const unsigned = { ...envelope };
         delete unsigned.signature;
         const msg = nacl.util.decodeUTF8(JSON.stringify(unsigned));
-        const sig = b64ToU8(signatureB64);
-        const pub = b64ToU8(signerPubB64);
+        const sig = fromB64(envelope.signature);
+        const pub = fromB64(envelope.pubkey);
         const ok = nacl.sign.detached.verify(msg, sig, pub);
-        return { ok, reason: ok ? "valid" : "invalid signature" };
+        return { ok: ok, reason: ok ? "valid" : "invalid signature" };
       } catch (err) {
         return { ok: false, reason: err && err.message ? err.message : "verification error" };
       }
     }
 
-    function renderInbox() {
-      if (!state.inbox.length) {
-        el.inboxList.innerHTML = '<p class="text-sm text-slate-300">Inbox empty.</p>';
+    function renderInbox(which) {
+      const me = app.agents[which];
+      const target = which === "a" ? el.inboxA : el.inboxB;
+
+      if (!me.inbox.length) {
+        target.innerHTML = '<p class="text-sm text-slate-300">No receipts yet.</p>';
         return;
       }
 
-      el.inboxList.innerHTML = state.inbox.map((msg, i) => {
+      target.innerHTML = me.inbox.map((msg, idx) => {
         const env = msg && msg.envelope ? msg.envelope : msg;
-        const v = verifyEnvelope(env || {});
-        const tone = v.ok ? "border-emerald-400/35 bg-emerald-500/10" : "border-rose-400/35 bg-rose-500/10";
-        const badge = v.ok ? '<span class="tiny rounded-full px-2 py-0.5 border border-emerald-400/40 text-emerald-300">Signature valid</span>' : `<span class="tiny rounded-full px-2 py-0.5 border border-rose-400/40 text-rose-300">Invalid: ${escapeHtml(v.reason)}</span>`;
-        return `
-          <article class="rounded-xl border ${tone} p-3 space-y-2">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <p class="tiny text-slate-200">Message #${i + 1}</p>
-              ${badge}
-            </div>
-            <p class="tiny text-slate-300">From: <span class="mono break-all">${escapeHtml(env.from || "unknown")}</span></p>
-            <p class="tiny text-slate-300">Type: <span class="mono">${escapeHtml(env.type || "-")}</span></p>
-            <p class="tiny text-slate-300">Timestamp: <span class="mono">${escapeHtml(env.timestamp || "-")}</span></p>
-            <pre class="tiny mono whitespace-pre-wrap break-words bg-slate-950/55 border border-cyan-900/40 rounded-lg p-2">${escapeHtml(JSON.stringify(env, null, 2))}</pre>
-          </article>
-        `;
+        const check = verifyEnvelope(env || {});
+        const badge = check.ok
+          ? '<span class="tiny rounded-full border border-emerald-400/40 text-emerald-300 px-2 py-0.5">Signature valid</span>'
+          : '<span class="tiny rounded-full border border-rose-400/40 text-rose-300 px-2 py-0.5">Invalid signature</span>';
+        const boxTone = check.ok
+          ? "border-emerald-400/30 bg-emerald-500/10"
+          : "border-rose-400/30 bg-rose-500/10";
+
+        return '' +
+          '<article class="rounded-xl border ' + boxTone + ' p-3 space-y-2">' +
+            '<div class="flex items-center justify-between gap-2">' +
+              '<p class="tiny text-slate-300">Receipt #' + String(idx + 1) + '</p>' +
+              badge +
+            '</div>' +
+            '<p class="tiny text-slate-300">From: <span class="mono break-all">' + escapeHtml(env && env.from ? env.from : "unknown") + '</span></p>' +
+            '<p class="tiny text-slate-300">Timestamp: <span class="mono">' + escapeHtml(env && env.timestamp ? env.timestamp : "-") + '</span></p>' +
+            '<pre class="tiny mono whitespace-pre-wrap break-words rounded-lg border border-slate-700/40 bg-slate-950/65 p-2">' + escapeHtml(JSON.stringify(env, null, 2)) + '</pre>' +
+          '</article>';
       }).join("");
     }
 
-    async function getHealth() {
-      const res = await fetch(RELAY + "/health");
-      if (!res.ok) throw new Error("Health check failed (" + res.status + ")");
-      state.health = await res.json();
-      renderStats();
+    function persistAgent(which) {
+      const me = app.agents[which];
+      if (!me.keyPair || !me.did) return;
+      localStorage.setItem(me.storeKey, JSON.stringify({
+        name: me.name,
+        did: me.did,
+        pubkeyB64: me.pubkeyB64,
+        publicKeyB64: toB64(me.keyPair.publicKey),
+        secretKeyB64: toB64(me.keyPair.secretKey)
+      }));
     }
 
-    async function discoverAgents() {
-      const res = await fetch(RELAY + "/discover");
-      if (!res.ok) throw new Error("Discover failed (" + res.status + ")");
-      const data = await res.json();
-      state.agents = Array.isArray(data.agents) ? data.agents : [];
-      renderAgents();
-      renderStats();
-    }
-
-    async function registerAgent() {
-      const name = (el.agentName.value || "").trim();
-      if (!name) throw new Error("Agent name is required.");
-
-      const keyPair = nacl.sign.keyPair();
-      const did = didFromEd25519PubKey(keyPair.publicKey);
-      const pubkeyB64 = u8ToB64(keyPair.publicKey);
-
-      const body = { did, name, pubkey: pubkeyB64 };
+    async function registerOnRelay(agent) {
       const res = await fetch(RELAY + "/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ did: agent.did, name: agent.name, pubkey: agent.pubkeyB64 })
       });
       if (!res.ok) {
-        const txt = await res.text();
-        throw new Error("Register failed (" + res.status + "): " + txt);
+        const text = await res.text();
+        throw new Error("register failed (" + res.status + "): " + text);
       }
-
-      state.keyPair = keyPair;
-      state.did = did;
-      state.name = name;
-      state.pubkeyB64 = pubkeyB64;
-      renderAgentIdentity();
-
-      await Promise.all([discoverAgents(), getHealth()]);
-      startInboxPolling();
     }
 
-    async function sendReceipt() {
-      if (!state.keyPair || !state.did) throw new Error("Create/register an agent first.");
-      const to = (el.toDid.value || "").trim();
-      if (!to) throw new Error("Recipient DID is required.");
+    async function createAgent(which) {
+      const me = app.agents[which];
+      const nameInput = which === "a" ? el.nameA : el.nameB;
+      const button = which === "a" ? el.createA : el.createB;
+      const name = (nameInput.value || "").trim();
+      if (!name) throw new Error("Name is required");
+
+      button.disabled = true;
+      setStatus(which, "Generating keys and registering...", "info");
+      try {
+        const keyPair = nacl.sign.keyPair();
+        me.keyPair = keyPair;
+        me.name = name;
+        me.pubkeyB64 = toB64(keyPair.publicKey);
+        me.did = didFromPubKey(keyPair.publicKey);
+
+        await registerOnRelay(me);
+        persistAgent(which);
+        renderIdentity(which);
+        syncRecipientFields();
+        renderStats();
+        setStatus(which, "Agent " + me.label + " ready.", "ok");
+      // Cross-fill the other agent's "To DID" field
+      if (which === "a" && app.agents.b) { el.toB.value = me.did; }
+      if (which === "b" && app.agents.a) { el.toA.value = me.did; }
+      if (which === "a") { el.toB.value = me.did; }
+      if (which === "b") { el.toA.value = me.did; }
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function sendReceipt(which) {
+      const me = app.agents[which];
+      const other = which === "a" ? app.agents.b : app.agents.a;
+      const payloadNode = which === "a" ? el.payloadA : el.payloadB;
+      const toNode = which === "a" ? el.toA : el.toB;
+
+      if (!me.keyPair || !me.did) {
+        throw new Error("Create Agent " + me.label + " first");
+      }
+
+      const to = (toNode.value || "").trim() || other.did;
+      if (!to) throw new Error("Recipient DID is required");
 
       let payload;
       try {
-        payload = JSON.parse(el.receiptPayload.value || "{}");
-      } catch (err) {
-        throw new Error("Payload must be valid JSON.");
+        payload = JSON.parse(payloadNode.value || "{}");
+      } catch (_e) {
+        throw new Error("Payload must be valid JSON");
       }
 
       const envelope = {
         type: "receipt",
-        from: state.did,
-        from_name: state.name,
-        pubkey: state.pubkeyB64,
-        to,
+        from: me.did,
+        from_name: me.name,
+        pubkey: me.pubkeyB64,
+        to: to,
         timestamp: new Date().toISOString(),
-        nonce: nacl.util.encodeBase64(nacl.randomBytes(16)),
-        payload,
+        nonce: toB64(nacl.randomBytes(16)),
+        payload: payload
       };
 
       const bytes = nacl.util.decodeUTF8(JSON.stringify(envelope));
-      const signature = nacl.sign.detached(bytes, state.keyPair.secretKey);
-      envelope.signature = u8ToB64(signature);
+      envelope.signature = toB64(nacl.sign.detached(bytes, me.keyPair.secretKey));
 
-      const res = await fetch(RELAY + "/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, envelope }),
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error("Send failed (" + res.status + "): " + txt);
+      const button = which === "a" ? el.sendA : el.sendB;
+      button.disabled = true;
+      setStatus(which, "Signing and sending...", "info");
+      try {
+        const res = await fetch(RELAY + "/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: to, envelope: envelope })
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error("send failed (" + res.status + "): " + text);
+        }
+        const otherName = which === "a" ? app.agents.b.name : app.agents.a.name;
+        setStatus(which, "⏳ Sending to " + (otherName || "recipient") + "...", "info");
+        const otherSide = which === "a" ? "b" : "a";
+        // Poll other side and confirm delivery
+        let delivered = false;
+        for (let i = 0; i < 4; i++) {
+          await new Promise(r => setTimeout(r, 750));
+          const prevCount = app.agents[otherSide].inbox.length;
+          await pollOneInbox(otherSide);
+          if (app.agents[otherSide].inbox.length > prevCount) {
+            delivered = true;
+            break;
+          }
+        }
+        if (delivered) {
+          setStatus(which, "✅ Receipt delivered to " + (otherName || "recipient") + "'s inbox!", "ok");
+        } else {
+          setStatus(which, "✅ Receipt sent. Waiting for " + (otherName || "recipient") + " to pick up.", "ok");
+        }
+      } finally {
+        button.disabled = false;
       }
-
-      setSendStatus("Receipt sent.", "ok");
-      await getHealth();
     }
 
-    async function pollInbox() {
-      if (!state.did) return;
-      const url = RELAY + "/receive?did=" + encodeURIComponent(state.did);
-      const res = await fetch(url);
-      if (!res.ok) throw new Error("Receive failed (" + res.status + ")");
-      const data = await res.json();
-      state.inbox = Array.isArray(data.messages) ? data.messages : [];
-      renderInbox();
+    async function pollHealthAndDiscover() {
+      let health = null;
+      let discovered = [];
+
+      try {
+        const healthRes = await fetch(RELAY + "/health");
+        if (healthRes.ok) {
+          health = await healthRes.json();
+        }
+      } catch (_e) {}
+
+      try {
+        const discoverRes = await fetch(RELAY + "/discover");
+        if (discoverRes.ok) {
+          discovered = normalizeDiscover(await discoverRes.json());
+        }
+      } catch (_e) {}
+
+      app.health = health;
+      app.discovered = discovered;
       renderStats();
     }
 
-    function startMainPolling() {
-      clearInterval(state.pollTimer);
-      state.pollTimer = setInterval(async () => {
-        try {
-          await Promise.all([discoverAgents(), getHealth()]);
-        } catch (_) {
-          renderStats();
+    async function pollOneInbox(which) {
+      const me = app.agents[which];
+      if (!me.did) return;
+
+      const url = RELAY + "/receive?did=" + encodeURIComponent(me.did) + "&pop=false";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("receive failed (" + res.status + ")");
+      const data = await res.json();
+      const messages = Array.isArray(data.messages) ? data.messages : [];
+
+      let added = false;
+      for (const msg of messages) {
+        const env = msg && msg.envelope ? msg.envelope : msg;
+        const dedupeKey = JSON.stringify(env);
+        if (!me.seen.has(dedupeKey)) {
+          me.seen.add(dedupeKey);
+          me.inbox.push(msg);
+          added = true;
         }
-      }, 7000);
+      }
+
+      if (added) renderInbox(which);
     }
 
-    function startInboxPolling() {
-      clearInterval(state.inboxTimer);
-      state.inboxTimer = setInterval(async () => {
-        try {
-          await pollInbox();
-        } catch (_) {
-          renderStats();
-        }
-      }, 5000);
+    async function pollInboxes() {
+      try {
+        await Promise.all([pollOneInbox("a"), pollOneInbox("b")]);
+      } catch (_e) {}
     }
 
     function wireEvents() {
-      el.createAgentBtn.addEventListener("click", async () => {
+      el.createA.addEventListener("click", async () => {
         try {
-          el.createAgentBtn.disabled = true;
-          setSendStatus("Creating and registering agent...");
-          await registerAgent();
-          setSendStatus("Agent ready.", "ok");
+          await createAgent("a");
         } catch (err) {
-          setSendStatus(err && err.message ? err.message : "Failed to create agent", "bad");
-        } finally {
-          el.createAgentBtn.disabled = false;
+          setStatus("a", err && err.message ? err.message : "Create failed", "bad");
         }
       });
 
-      el.sendBtn.addEventListener("click", async () => {
+      el.createB.addEventListener("click", async () => {
         try {
-          el.sendBtn.disabled = true;
-          setSendStatus("Signing and sending...");
-          await sendReceipt();
+          await createAgent("b");
         } catch (err) {
-          setSendStatus(err && err.message ? err.message : "Send failed", "bad");
-        } finally {
-          el.sendBtn.disabled = false;
+          setStatus("b", err && err.message ? err.message : "Create failed", "bad");
+        }
+      });
+
+      el.sendA.addEventListener("click", async () => {
+        try {
+          await sendReceipt("a");
+          await pollOneInbox("b");
+          await pollHealthAndDiscover();
+        } catch (err) {
+          setStatus("a", err && err.message ? err.message : "Send failed", "bad");
+        }
+      });
+
+      el.resetA = document.getElementById("resetA");
+      el.resetB = document.getElementById("resetB");
+      
+      el.resetA.addEventListener("click", () => {
+        localStorage.removeItem("nexus_agent_a");
+        app.agents.a = { key: "a", label: "A", storeKey: "nexus_agent_a", keyPair: null, did: "", name: "", pubkeyB64: "", inbox: [], seen: new Set() };
+        el.didA.textContent = ""; el.pubA.textContent = ""; el.nameA.value = "";
+        el.inboxA.innerHTML = '<p class="text-sm text-slate-400">No receipts yet.</p>';
+        setStatus("a", "Agent A reset.", "info");
+      });
+      
+      el.resetB.addEventListener("click", () => {
+        localStorage.removeItem("nexus_agent_b");
+        app.agents.b = { key: "b", label: "B", storeKey: "nexus_agent_b", keyPair: null, did: "", name: "", pubkeyB64: "", inbox: [], seen: new Set() };
+        el.didB.textContent = ""; el.pubB.textContent = ""; el.nameB.value = "";
+        el.inboxB.innerHTML = '<p class="text-sm text-slate-400">No receipts yet.</p>';
+        setStatus("b", "Agent B reset.", "info");
+      });
+      
+      el.sendB.addEventListener("click", async () => {
+        try {
+          await sendReceipt("b");
+          await pollOneInbox("a");
+          await pollHealthAndDiscover();
+        } catch (err) {
+          setStatus("b", err && err.message ? err.message : "Send failed", "bad");
         }
       });
     }
 
-    async function boot() {
-      el.relayUrl.textContent = RELAY;
-      renderAgentIdentity();
-      renderAgents();
-      renderInbox();
-      renderStats();
-      wireEvents();
-      startMainPolling();
+    async function restoreAgent(which) {
+      const me = app.agents[which];
+      const nameInput = which === "a" ? el.nameA : el.nameB;
+
+      const raw = localStorage.getItem(me.storeKey);
+      if (!raw) return;
 
       try {
-        await Promise.all([discoverAgents(), getHealth()]);
-      } catch (err) {
-        setSendStatus("Ready. Relay fetches will run when allowed by your browser/network.");
+        const saved = JSON.parse(raw);
+        const publicKey = fromB64(saved.publicKeyB64);
+        const secretKey = fromB64(saved.secretKeyB64);
+
+        me.name = saved.name || "";
+        me.did = saved.did || "";
+        me.pubkeyB64 = saved.pubkeyB64 || toB64(publicKey);
+        me.keyPair = { publicKey: publicKey, secretKey: secretKey };
+
+        nameInput.value = me.name;
+        renderIdentity(which);
+        syncRecipientFields();
+
+        if (me.did && me.pubkeyB64) {
+          try {
+            await registerOnRelay(me);
+            setStatus(which, "Restored and re-registered.", "ok");
+          } catch (_e) {
+            setStatus(which, "Restored locally. Relay register pending.", "info");
+          }
+        }
+      } catch (_e) {
+        localStorage.removeItem(me.storeKey);
       }
+    }
+
+    async function boot() {
+      renderIdentity("a");
+      renderIdentity("b");
+      renderInbox("a");
+      renderInbox("b");
+      renderStats();
+      wireEvents();
+
+      await Promise.all([restoreAgent("a"), restoreAgent("b")]);
+      syncRecipientFields();
+      renderStats();
+
+      await pollHealthAndDiscover();
+      await pollInboxes();
+
+      clearInterval(app.healthTimer);
+      clearInterval(app.inboxTimer);
+      app.healthTimer = setInterval(pollHealthAndDiscover, 5000);
+      app.inboxTimer = setInterval(pollInboxes, 3000);
     }
 
     boot();
