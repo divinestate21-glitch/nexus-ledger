@@ -572,7 +572,16 @@
         }
       }
 
-      if (added) renderInbox(which);
+      if (added) {
+        renderInbox(which);
+        // Clear stale "waiting for pickup" on the OTHER side since we just received
+        const otherSide = which === "a" ? "b" : "a";
+        const otherStatus = otherSide === "a" ? el.statusA : el.statusB;
+        if (otherStatus && otherStatus.textContent.includes("Waiting for")) {
+          const myName = app.agents[which].name || ("Agent " + which.toUpperCase());
+          setStatus(otherSide, "✅ " + myName + " received and responded!", "ok");
+        }
+      }
     }
 
     async function pollInboxes() {
