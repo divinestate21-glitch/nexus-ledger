@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
-from urllib import parse, request
-from urllib.error import HTTPError, URLError
+from typing import Any, Callable, Dict, List, Optional
 
+from .crypto import decrypt_payload, encrypt_payload
 from .erc8004 import (
     BASE_MAINNET_RPC,
     HACKATHON_AGENT_ID,
@@ -20,6 +19,8 @@ from .ledger import Ledger, receipt_proof_hash, receipt_signing_payload
 from .proof_anchor import anchor as anchor_proof
 from .proof_anchor import verify as verify_proof
 from .protocol import generate_keypair, sign, verify
+from .receipt_types import TaskAccepted, TaskConfirmed, TaskDelivered, TaskDisputed, TaskRequest, new_task_id
+from .relay_manager import DEFAULT_RELAYS, RelayManager
 from .transport import (
     HTTPTransport,
     pack_receipt,
@@ -29,9 +30,33 @@ from .transport import (
     send_receipt as transport_send_receipt,
     unpack_receipt,
 )
+from .trust import TrustScorer
+from .ws_transport import LiveConnection
 
 
-DEFAULT_RELAY_URL = "http://104.236.251.94:8765"
+DEFAULT_RELAY_URL = DEFAULT_RELAYS[0]
+
+
+def verify_receipt_dict(receipt: Dict[str, Any]) -> bool:
+    required_fields = [
+        "timestamp",
+        "event_type",
+        "data",
+        "parent_receipt_hash",
+        "agent_a_pubkey",
+        "agent_b_pubkey",
+        "agent_a_signature",
+        "agent_b_signature",
+    ]
+    if not isinstance(receipt, dict):
+        return False
+    if any(field not in receipt for field in required_fields):
+        return False
+
+    payload = receipt_signing_payload(receipt)
+    agent_a_ok = verify(str(receipt["agent_a_pubkey"]), payload, str(receipt["agent_a_signature"]))
+    agent_b_ok = verify(str(receipt["agent_b_pubkey"]), payload, str(receipt["agent_b_signature"]))
+    return agent_a_ok and agent_b_ok
 
 
 class Agent:
@@ -41,7 +66,8 @@ class Agent:
         *,
         keys_dir: str = "keys",
         db_path: str = "nexus.db",
-        relay: str = DEFAULT_RELAY_URL,
+        relay: Optional[str] = None,
+        relays: Optional[List[str]] = None,
         erc8004_agent_id: int = HACKATHON_AGENT_ID,
         erc8004_wallet: str = HACKATHON_WALLET,
         erc8004_registration_tx: str = REGISTRATION_TX_HASH,
@@ -58,7 +84,12 @@ class Agent:
         self.private_key, self.public_key = self._load_or_create_keys()
         self._ledger = Ledger(path=db_path)
         self._listener_server = None
-        self.relay = str(relay).strip() or DEFAULT_RELAY_URL
+
+        configured_relays = self._normalize_relays(relay=relay, relays=relays)
+        self.relays = configured_relays
+        self.relay = configured_relays[0]
+        self._relay_manager = RelayManager(configured_relays, timeout_seconds=0.75)
+
         self.erc8004_agent_id = int(erc8004_agent_id)
         self.erc8004_wallet = str(erc8004_wallet).strip() or HACKATHON_WALLET
         self._erc8004 = ERC8004(
@@ -68,8 +99,23 @@ class Agent:
             default_wallet=self.erc8004_wallet,
         )
         self._relay_available = False
-        self._relay_timeout_seconds = 0.75
+        self._receipt_callbacks: List[Callable[[Dict[str, Any]], None]] = []
+        self._live_connection: Optional[LiveConnection] = None
+        self._trust = TrustScorer()
         self._register_on_relay_safely()
+
+    @staticmethod
+    def _normalize_relays(*, relay: Optional[str], relays: Optional[List[str]]) -> List[str]:
+        if relays:
+            cleaned = [str(item).strip() for item in relays if str(item).strip()]
+            if cleaned:
+                return cleaned
+        if relay:
+            primary = str(relay).strip()
+            if primary:
+                fallback = DEFAULT_RELAYS[1]
+                return [primary, fallback] if primary != fallback else [primary]
+        return list(DEFAULT_RELAYS)
 
     def _key_file_path(self) -> Path:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in self.name).strip("_")
@@ -138,19 +184,17 @@ class Agent:
         return self._relay_available
 
     def _register_on_relay_safely(self) -> None:
-        try:
-            self._relay_request(
-                "/register",
-                method="POST",
-                payload={"did": self.did, "name": self.name, "pubkey": self.public_key},
-            )
+        attempts = self._relay_request_all(
+            "/register",
+            method="POST",
+            payload={"did": self.did, "name": self.name, "pubkey": self.public_key},
+        )
+        if attempts:
             self._relay_available = True
-        except Exception:
-            try:
-                self._relay_request("/health")
-                self._relay_available = True
-            except Exception:
-                self._relay_available = False
+            return
+
+        checks = self._relay_request_all("/health")
+        self._relay_available = bool(checks)
 
     def _relay_request(
         self,
@@ -160,32 +204,37 @@ class Agent:
         params: Optional[Dict[str, Any]] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        base = self.relay.rstrip("/")
-        rel = path if path.startswith("/") else f"/{path}"
-        query = f"?{parse.urlencode(params)}" if params else ""
-        url = f"{base}{rel}{query}"
-
-        headers = {"Accept": "application/json"}
-        body = None
-        if payload is not None:
-            body = json.dumps(payload, sort_keys=True).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-
-        req = request.Request(url, data=body, headers=headers, method=method.upper())
         try:
-            with request.urlopen(req, timeout=self._relay_timeout_seconds) as response:
-                text = response.read().decode("utf-8").strip()
-        except (HTTPError, URLError, TimeoutError) as exc:
+            response = self._relay_manager.request(path, method=method, params=params, payload=payload)
+            self.relay = self._relay_manager.active_relay
+            self._relay_available = True
+            return response
+        except Exception as exc:
             self._relay_available = False
             raise RuntimeError(f"Relay request failed: {exc}") from exc
 
-        self._relay_available = True
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
+    def _relay_request_all(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> List[Any]:
+        if "_relay_request" in self.__dict__:
+            try:
+                return [self._relay_request(path, method=method, params=params, payload=payload)]
+            except Exception:
+                return []
+
+        attempts = self._relay_manager.request_all(path, method=method, params=params, payload=payload)
+        successes = [attempt.response for attempt in attempts if attempt.ok]
+        if successes:
+            self.relay = self._relay_manager.active_relay
+            self._relay_available = True
+        elif not attempts:
+            self._relay_available = False
+        return successes
 
     def _parse_discovery_response(self, payload: Any) -> Optional[Dict[str, Any]]:
         if isinstance(payload, dict) and "agents" in payload:
@@ -274,7 +323,45 @@ class Agent:
                 result.append(parsed)
         return result
 
-    def send(self, event_type: str, data: Dict[str, Any], *, to: str) -> Dict[str, Any]:
+    def _latest_task_receipt_hash(self, task_id: str) -> str:
+        chain = self.get_task_chain(task_id)
+        if not chain:
+            return ""
+        return str(chain[-1].get("proof_hash", ""))
+
+    def _resolve_task_counterparty_pubkey(self, task_id: str) -> Optional[str]:
+        chain = self.get_task_chain(task_id)
+        if not chain:
+            return None
+        latest = chain[-1]
+        a = str(latest.get("agent_a_pubkey", ""))
+        b = str(latest.get("agent_b_pubkey", ""))
+        if a == self.public_key:
+            return b
+        if b == self.public_key:
+            return a
+        return b or a or None
+
+    def _wrap_for_transport(self, receipt: Dict[str, Any], recipient_pubkey: str, encrypted: bool) -> Dict[str, Any]:
+        if not encrypted:
+            return receipt
+        return encrypt_payload(receipt, self.private_key, recipient_pubkey)
+
+    def _unwrap_transport_payload(self, payload: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+        if payload.get("encrypted") is True:
+            decrypted = decrypt_payload(payload, self.private_key)
+            return decrypted, True
+        return payload, False
+
+    def send(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        *,
+        to: str,
+        encrypted: bool = False,
+        parent_receipt_hash: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not isinstance(data, dict):
             raise ValueError("data must be a dict")
         if not self._relay_available:
@@ -294,56 +381,135 @@ class Agent:
             recipient_did = str(found["did"])
             recipient_pubkey = str(found["pubkey"])
 
-        receipt = self.create_receipt(event_type, data, recipient_pubkey)
-        envelope = json.loads(pack_receipt(receipt, self.private_key))
+        parent_hash = str(parent_receipt_hash or "")
+        if not parent_hash and str(data.get("task_id", "")).strip():
+            parent_hash = self._latest_task_receipt_hash(str(data["task_id"]))
+
+        receipt = self.create_receipt(event_type, data, recipient_pubkey, parent_receipt_hash=parent_hash)
+        payload = self._wrap_for_transport(receipt, recipient_pubkey, encrypted=encrypted)
+        envelope = json.loads(pack_receipt(payload, self.private_key))
         self._relay_request("/send", method="POST", payload={"to": recipient_did, "envelope": envelope})
         return receipt
+
+    def _process_envelope(self, envelope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        envelope_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+        sender_did = str(envelope.get("sender_did", "")).strip()
+
+        try:
+            payload = unpack_receipt(envelope_json, expected_sender_did=sender_did or None)
+        except ValueError:
+            return []
+
+        try:
+            receipt, was_encrypted = self._unwrap_transport_payload(payload)
+        except Exception:
+            return []
+
+        processed: List[Dict[str, Any]] = []
+
+        if "agent_b_signature" in receipt:
+            if self.verify_receipt(receipt):
+                stored = self.store_receipt(receipt)
+                stored_receipt = dict(receipt)
+                stored_receipt["proof_hash"] = stored["proof_hash"]
+                processed.append(stored_receipt)
+            return processed
+
+        if str(receipt.get("agent_b_pubkey", "")) != self.public_key:
+            return processed
+
+        try:
+            countersigned = self.countersign_receipt(receipt)
+        except ValueError:
+            return processed
+
+        stored = self.store_receipt(countersigned)
+        countersigned["proof_hash"] = stored["proof_hash"]
+        processed.append(countersigned)
+
+        if sender_did:
+            response_payload: Dict[str, Any] = countersigned
+            if was_encrypted:
+                response_payload = self._wrap_for_transport(countersigned, str(receipt["agent_a_pubkey"]), encrypted=True)
+            response_envelope = json.loads(pack_receipt(response_payload, self.private_key))
+            try:
+                self._relay_request(
+                    "/send",
+                    method="POST",
+                    payload={"to": sender_did, "envelope": response_envelope},
+                )
+            except RuntimeError:
+                pass
+
+        return processed
+
+    def _dispatch_receipt(self, receipt: Dict[str, Any]) -> None:
+        for callback in list(self._receipt_callbacks):
+            try:
+                callback(receipt)
+            except Exception:
+                continue
+
+    def _poll_once(self) -> None:
+        self.check_inbox()
+
+    def _on_ws_message(self, payload: Dict[str, Any]) -> None:
+        envelopes = self._extract_envelopes(payload)
+        for envelope in envelopes:
+            for receipt in self._process_envelope(envelope):
+                self._dispatch_receipt(receipt)
+
+    def on_receipt(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        self._receipt_callbacks.append(callback)
+        if self._live_connection is None:
+            self._live_connection = LiveConnection(
+                did=self.did,
+                relay_manager=self._relay_manager,
+                on_ws_message=self._on_ws_message,
+                poll_once=self._poll_once,
+                poll_interval_seconds=1.0,
+            )
+            self._live_connection.start()
 
     def check_inbox(self) -> list[Dict[str, Any]]:
         if not self._relay_available:
             return []
-        try:
-            payload = self._relay_request("/receive", params={"did": self.did})
-        except RuntimeError:
-            return []
 
-        envelopes = self._extract_envelopes(payload)
+        payloads = self._relay_request_all("/receive", params={"did": self.did})
+        if not payloads:
+            try:
+                payloads = [self._relay_request("/receive", params={"did": self.did})]
+            except RuntimeError:
+                return []
+
+        envelope_map: Dict[str, Dict[str, Any]] = {}
+        for payload in payloads:
+            for envelope in self._extract_envelopes(payload):
+                key = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+                envelope_map[key] = envelope
+
         processed: list[Dict[str, Any]] = []
-        for envelope in envelopes:
-            envelope_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
-            sender_did = str(envelope.get("sender_did", "")).strip()
-
-            try:
-                receipt = unpack_receipt(envelope_json, expected_sender_did=sender_did or None)
-            except ValueError:
-                continue
-            if "agent_b_signature" in receipt:
-                if self.verify_receipt(receipt):
-                    self.store_receipt(receipt)
-                    processed.append(receipt)
-                continue
-
-            try:
-                countersigned = self.countersign_receipt(receipt)
-            except ValueError:
-                continue
-            self.store_receipt(countersigned)
-            processed.append(countersigned)
-
-            if sender_did:
-                response_envelope = json.loads(pack_receipt(countersigned, self.private_key))
-                try:
-                    self._relay_request(
-                        "/send",
-                        method="POST",
-                        payload={"to": sender_did, "envelope": response_envelope},
-                    )
-                except RuntimeError:
+        seen_hashes: set[str] = set()
+        for envelope in envelope_map.values():
+            for receipt in self._process_envelope(envelope):
+                proof_hash = str(receipt.get("proof_hash", ""))
+                if proof_hash and proof_hash in seen_hashes:
                     continue
+                if proof_hash:
+                    seen_hashes.add(proof_hash)
+                processed.append(receipt)
+                self._dispatch_receipt(receipt)
 
         return processed
 
-    def create_receipt(self, event_type: str, data: Dict[str, Any], counterparty_pubkey: str) -> Dict[str, Any]:
+    def create_receipt(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        counterparty_pubkey: str,
+        *,
+        parent_receipt_hash: str = "",
+    ) -> Dict[str, Any]:
         if not str(counterparty_pubkey).strip():
             raise ValueError("counterparty_pubkey is required")
         if not isinstance(data, dict):
@@ -353,6 +519,7 @@ class Agent:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": str(event_type),
             "data": data,
+            "parent_receipt_hash": str(parent_receipt_hash or ""),
             "agent_a_pubkey": self.public_key,
             "agent_b_pubkey": str(counterparty_pubkey),
         }
@@ -367,6 +534,7 @@ class Agent:
             "timestamp",
             "event_type",
             "data",
+            "parent_receipt_hash",
             "agent_a_pubkey",
             "agent_b_pubkey",
             "agent_a_signature",
@@ -387,29 +555,13 @@ class Agent:
         return countersigned
 
     def verify_receipt(self, receipt: Dict[str, Any]) -> bool:
-        required_fields = [
-            "timestamp",
-            "event_type",
-            "data",
-            "agent_a_pubkey",
-            "agent_b_pubkey",
-            "agent_a_signature",
-            "agent_b_signature",
-        ]
-        if not isinstance(receipt, dict):
-            return False
-        if any(field not in receipt for field in required_fields):
-            return False
-
-        payload = receipt_signing_payload(receipt)
-        agent_a_ok = verify(str(receipt["agent_a_pubkey"]), payload, str(receipt["agent_a_signature"]))
-        agent_b_ok = verify(str(receipt["agent_b_pubkey"]), payload, str(receipt["agent_b_signature"]))
-        return agent_a_ok and agent_b_ok
+        return verify_receipt_dict(receipt)
 
     def store_receipt(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
         if not self.verify_receipt(receipt):
             raise ValueError("Cannot store invalid receipt")
         receipt_to_store = dict(receipt)
+        receipt_to_store.setdefault("parent_receipt_hash", "")
         receipt_to_store["proof_hash"] = receipt_proof_hash(receipt_to_store)
         return self._ledger.store_receipt(receipt_to_store)
 
@@ -484,3 +636,124 @@ class Agent:
             did_provider=self.export_did,
         )
         return self._listener_server
+
+    def get_task_chain(self, task_id: str) -> List[Dict[str, Any]]:
+        rows = self._ledger.get_task_chain(task_id)
+        if not rows:
+            return []
+
+        parsed: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                data = json.loads(str(item.get("data_json", "{}")))
+            except json.JSONDecodeError:
+                data = {}
+            item["data"] = data
+            parsed.append(item)
+
+        by_proof = {str(item.get("proof_hash", "")): item for item in parsed}
+        roots = [
+            item
+            for item in parsed
+            if not str(item.get("parent_receipt_hash", ""))
+            or str(item.get("parent_receipt_hash", "")) not in by_proof
+        ]
+
+        ordered: List[Dict[str, Any]] = []
+        current = roots[0] if roots else parsed[0]
+        remaining = {id(item): item for item in parsed}
+        while current and id(current) in remaining:
+            ordered.append(current)
+            remaining.pop(id(current), None)
+            next_item = None
+            for candidate in list(remaining.values()):
+                if str(candidate.get("parent_receipt_hash", "")) == str(current.get("proof_hash", "")):
+                    next_item = candidate
+                    break
+            current = next_item
+
+        ordered.extend(remaining.values())
+        return ordered
+
+    def request_task(
+        self,
+        to: str,
+        *,
+        description: str,
+        budget: float,
+        deadline: Optional[str] = None,
+        task_id: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        tid = str(task_id or new_task_id())
+        typed = TaskRequest(task_id=tid, description=description, budget=budget, deadline=deadline or datetime.now(timezone.utc).isoformat())
+        return self.send("TaskRequest", typed.as_data(), to=to, encrypted=encrypted)
+
+    def accept_task(self, to: str, *, task_id: str, estimated_delivery: str, encrypted: bool = False) -> Dict[str, Any]:
+        typed = TaskAccepted(task_id=task_id, estimated_delivery=estimated_delivery)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskAccepted", typed.as_data(), to=to, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def deliver_task(
+        self,
+        task_id: str,
+        *,
+        artifact_hash: str,
+        artifact_url: Optional[str] = None,
+        to: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        typed = TaskDelivered(task_id=task_id, artifact_hash=artifact_hash, artifact_url=artifact_url)
+        counterparty = to
+        if not counterparty:
+            pubkey = self._resolve_task_counterparty_pubkey(task_id)
+            if not pubkey:
+                raise ValueError("Could not infer task counterparty; provide 'to'")
+            counterparty = public_key_to_did(pubkey)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskDelivered", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def confirm_task(
+        self,
+        task_id: str,
+        *,
+        rating: int,
+        feedback: str,
+        to: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        typed = TaskConfirmed(task_id=task_id, rating=rating, feedback=feedback)
+        counterparty = to
+        if not counterparty:
+            pubkey = self._resolve_task_counterparty_pubkey(task_id)
+            if not pubkey:
+                raise ValueError("Could not infer task counterparty; provide 'to'")
+            counterparty = public_key_to_did(pubkey)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskConfirmed", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def dispute_task(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+        to: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        typed = TaskDisputed(task_id=task_id, reason=reason)
+        counterparty = to
+        if not counterparty:
+            pubkey = self._resolve_task_counterparty_pubkey(task_id)
+            if not pubkey:
+                raise ValueError("Could not infer task counterparty; provide 'to'")
+            counterparty = public_key_to_did(pubkey)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskDisputed", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def trust_score(self) -> float:
+        return float(self.get_trust_report(self.public_key)["score"])
+
+    def get_trust_report(self, agent_pubkey: str) -> Dict[str, Any]:
+        report = self._trust.build_report(agent_pubkey, self._ledger.get_receipts())
+        return report

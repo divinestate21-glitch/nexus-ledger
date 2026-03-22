@@ -36,6 +36,7 @@ def receipt_signing_payload(receipt: JsonDict) -> JsonDict:
         "data": receipt["data"],
         "agent_a_pubkey": str(receipt["agent_a_pubkey"]),
         "agent_b_pubkey": str(receipt["agent_b_pubkey"]),
+        "parent_receipt_hash": str(receipt.get("parent_receipt_hash", "")),
     }
 
 
@@ -44,6 +45,7 @@ def receipt_proof_hash(receipt: JsonDict) -> str:
         "timestamp": str(receipt["timestamp"]),
         "event_type": str(receipt["event_type"]),
         "data": receipt["data"],
+        "parent_receipt_hash": str(receipt.get("parent_receipt_hash", "")),
         "agent_a_pubkey": str(receipt["agent_a_pubkey"]),
         "agent_a_signature": str(receipt["agent_a_signature"]),
         "agent_b_pubkey": str(receipt["agent_b_pubkey"]),
@@ -115,6 +117,8 @@ class Ledger:
                 timestamp TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 data_json TEXT NOT NULL,
+                task_id TEXT,
+                parent_receipt_hash TEXT,
                 agent_a_pubkey TEXT NOT NULL,
                 agent_a_signature TEXT NOT NULL,
                 agent_b_pubkey TEXT NOT NULL,
@@ -128,7 +132,18 @@ class Ledger:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_a ON receipts(agent_a_pubkey)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_b ON receipts(agent_b_pubkey)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_timestamp ON receipts(timestamp)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_task_id ON receipts(task_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_parent_hash ON receipts(parent_receipt_hash)")
+        self._add_missing_receipt_columns()
         self._conn.commit()
+
+    def _add_missing_receipt_columns(self) -> None:
+        cols = self._conn.execute("PRAGMA table_info(receipts)").fetchall()
+        names = {str(col["name"]) for col in cols}
+        if "task_id" not in names:
+            self._conn.execute("ALTER TABLE receipts ADD COLUMN task_id TEXT")
+        if "parent_receipt_hash" not in names:
+            self._conn.execute("ALTER TABLE receipts ADD COLUMN parent_receipt_hash TEXT")
 
     def log(
         self,
@@ -208,6 +223,7 @@ class Ledger:
             "agent_a_signature",
             "agent_b_pubkey",
             "agent_b_signature",
+            "parent_receipt_hash",
         ]
         missing = [field for field in required_fields if field not in receipt_dict]
         if missing:
@@ -221,6 +237,8 @@ class Ledger:
             "timestamp": str(receipt_dict["timestamp"]),
             "event_type": str(receipt_dict["event_type"]),
             "data": data,
+            "task_id": str(data.get("task_id", "")).strip() or None,
+            "parent_receipt_hash": str(receipt_dict.get("parent_receipt_hash", "")),
             "agent_a_pubkey": str(receipt_dict["agent_a_pubkey"]),
             "agent_a_signature": str(receipt_dict["agent_a_signature"]),
             "agent_b_pubkey": str(receipt_dict["agent_b_pubkey"]),
@@ -234,17 +252,21 @@ class Ledger:
                 timestamp,
                 event_type,
                 data_json,
+                task_id,
+                parent_receipt_hash,
                 agent_a_pubkey,
                 agent_a_signature,
                 agent_b_pubkey,
                 agent_b_signature,
                 proof_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_receipt["timestamp"],
                 normalized_receipt["event_type"],
                 _canonical_json(data),
+                normalized_receipt["task_id"],
+                normalized_receipt["parent_receipt_hash"],
                 normalized_receipt["agent_a_pubkey"],
                 normalized_receipt["agent_a_signature"],
                 normalized_receipt["agent_b_pubkey"],
@@ -259,6 +281,8 @@ class Ledger:
             "timestamp": normalized_receipt["timestamp"],
             "event_type": normalized_receipt["event_type"],
             "data_json": _canonical_json(data),
+            "task_id": normalized_receipt["task_id"],
+            "parent_receipt_hash": normalized_receipt["parent_receipt_hash"],
             "agent_a_pubkey": normalized_receipt["agent_a_pubkey"],
             "agent_a_signature": normalized_receipt["agent_a_signature"],
             "agent_b_pubkey": normalized_receipt["agent_b_pubkey"],
@@ -274,6 +298,8 @@ class Ledger:
                 timestamp,
                 event_type,
                 data_json,
+                task_id,
+                parent_receipt_hash,
                 agent_a_pubkey,
                 agent_a_signature,
                 agent_b_pubkey,
@@ -293,6 +319,8 @@ class Ledger:
                 timestamp,
                 event_type,
                 data_json,
+                task_id,
+                parent_receipt_hash,
                 agent_a_pubkey,
                 agent_a_signature,
                 agent_b_pubkey,
@@ -303,6 +331,32 @@ class Ledger:
             ORDER BY id ASC
             """,
             (counterparty_pubkey, counterparty_pubkey),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_task_chain(self, task_id: str) -> List[JsonDict]:
+        task = str(task_id).strip()
+        if not task:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                event_type,
+                data_json,
+                task_id,
+                parent_receipt_hash,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            FROM receipts
+            WHERE task_id = ?
+            ORDER BY id ASC
+            """,
+            (task,),
         ).fetchall()
         return [dict(row) for row in rows]
 

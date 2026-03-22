@@ -1,15 +1,15 @@
-"""Nexus Ledger v3.0.0 standalone full-flow demo."""
+"""Nexus Ledger v4.0.0 standalone full-flow demo."""
 
 from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MethodType
 from typing import Any, Dict
 
 from nexus_ledger import Agent
-from nexus_ledger.ledger import receipt_proof_hash
 
 
 class InMemoryRelay:
@@ -110,94 +110,71 @@ def main() -> None:
         "Mercury",
         keys_dir=str(base / "keys_mercury"),
         db_path=str(base / "mercury.db"),
-        relay="memory://relay",
+        relays=["http://104.236.251.94:8765", "http://localhost:8765"],
     )
     iris = Agent(
         "Iris",
         keys_dir=str(base / "keys_iris"),
         db_path=str(base / "iris.db"),
-        relay="memory://relay",
+        relays=["http://104.236.251.94:8765", "http://localhost:8765"],
     )
+
     attach_relay(mercury, relay)
     attach_relay(iris, relay)
 
-    section("1) 🧠 Agent Boot")
-    print(f"🚀 Mercury ready: {mercury.name}")
-    print(f"🚀 Iris ready:    {iris.name}")
+    section("1) Multi-Relay + Identity")
+    print(f"Mercury relays: {mercury.relays}")
+    print(f"Iris relays:    {iris.relays}")
+    print(f"Mercury DID:    {mercury.did}")
+    print(f"Iris DID:       {iris.did}")
 
-    section("2) 🪪 DID Identity")
-    print(f"🛰️  Mercury DID: {mercury.did}")
-    print(f"🛰️  Iris DID:    {iris.did}")
+    section("2) Live Receipt Callback + WS Fallback")
+    live_events: list[dict[str, Any]] = []
+    mercury.on_receipt(lambda receipt: live_events.append(receipt))
 
-    section("3) 🗂️ Local Logging")
-    mercury_log = mercury.log("task_completed", {"job": "market_research", "status": "done"}, counterparty=iris)
-    iris_log = iris.log("task_received", {"job": "market_research", "status": "accepted"}, counterparty=mercury)
-    print("Mercury log entry:")
-    print(pretty(mercury_log))
-    print("Iris log entry:")
-    print(pretty(iris_log))
-
-    section("4) 🤝 P2P Receipt: Create + Countersign + Verify")
-    draft_receipt = mercury.create_receipt(
-        "delivery_receipt",
-        {"task_id": "HX-042", "artifact": "research.pdf", "result": "delivered"},
-        iris.public_key,
+    section("3) Task Request/Accept/Deliver/Confirm (Typed Receipts + Chains)")
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    request_receipt = mercury.request_task("Iris", description="market research", budget=100, deadline=deadline, encrypted=True)
+    iris.check_inbox()
+    accept_receipt = iris.accept_task("Mercury", task_id=request_receipt["data"]["task_id"], estimated_delivery=deadline, encrypted=True)
+    mercury.check_inbox()
+    deliver_receipt = iris.deliver_task(
+        request_receipt["data"]["task_id"],
+        artifact_hash="sha256:abc123",
+        artifact_url="https://example.com/artifact",
+        to="Mercury",
+        encrypted=True,
     )
-    countersigned_receipt = iris.countersign_receipt(draft_receipt)
-    mercury_ok = mercury.verify_receipt(countersigned_receipt)
-    iris_ok = iris.verify_receipt(countersigned_receipt)
-    mercury_store = mercury.store_receipt(countersigned_receipt)
-    iris_store = iris.store_receipt(countersigned_receipt)
-    print("Countersigned receipt:")
-    print(pretty(countersigned_receipt))
-    print(f"✅ Mercury verifies: {mercury_ok}")
-    print(f"✅ Iris verifies:    {iris_ok}")
-    print(f"🧾 Stored proof hash (Mercury): {mercury_store['proof_hash']}")
-    print(f"🧾 Stored proof hash (Iris):    {iris_store['proof_hash']}")
+    mercury.check_inbox()
+    confirm_receipt = mercury.confirm_task(request_receipt["data"]["task_id"], rating=5, feedback="excellent", to="Iris", encrypted=True)
+    iris.check_inbox()
+    mercury.check_inbox()
 
-    section("5) 📡 Relay Send + Inbox Check")
-    outbound = mercury.send(
-        "delivery_receipt",
-        {"task_id": "HX-043", "artifact": "summary.md", "result": "delivered_via_relay"},
-        to="Iris",
-    )
-    print("Outbound receipt created and sent by Mercury:")
-    print(pretty(outbound))
+    chain = mercury.get_task_chain(request_receipt["data"]["task_id"])
+    print("Task request:")
+    print(pretty(request_receipt))
+    print("Task accepted:")
+    print(pretty(accept_receipt))
+    print("Task delivered:")
+    print(pretty(deliver_receipt))
+    print("Task confirmed:")
+    print(pretty(confirm_receipt))
+    print(f"Chain length: {len(chain)}")
+    print(f"Live callbacks fired: {len(live_events)}")
 
-    iris_inbox = iris.check_inbox()
-    mercury_inbox = mercury.check_inbox()
-    print(f"📥 Iris inbox processed: {len(iris_inbox)} receipt(s)")
-    print(f"📥 Mercury inbox processed: {len(mercury_inbox)} receipt(s)")
+    section("4) Trust Scoring")
+    mercury_report = mercury.get_trust_report(mercury.public_key)
+    iris_report = mercury.get_trust_report(iris.public_key)
+    print("Mercury trust report:")
+    print(pretty(mercury_report))
+    print("Iris trust report:")
+    print(pretty(iris_report))
 
-    final_receipt = mercury_inbox[-1] if mercury_inbox else {}
-    if final_receipt:
-        print("Final dual-signed receipt returned through relay:")
-        print(pretty(final_receipt))
+    section("5) CLI-Compatible Verification")
+    final_receipt = mercury.get_task_chain(request_receipt["data"]["task_id"])[-1]
+    print(f"Final receipt proof hash: {final_receipt['proof_hash']}")
 
-    section("6) 🏁 Snapshot Summary")
-    print(f"Mercury activity rows: {len(mercury.all_activity())}")
-    print(f"Iris activity rows:    {len(iris.all_activity())}")
-    print(f"Mercury receipts:      {len(mercury._ledger.get_receipts())}")
-    print(f"Iris receipts:         {len(iris._ledger.get_receipts())}")
-
-    section("7) ⛓️ ERC-8004 On-Chain Trust (Base Mainnet)")
-    try:
-        identity = mercury.erc8004_identity()
-        reputation = mercury.get_on_chain_reputation()
-        linked_receipt_hash = receipt_proof_hash(countersigned_receipt)
-        print("ERC-8004 identity:")
-        print(pretty(identity))
-        print("ERC-8004 reputation snapshot:")
-        print(pretty(reputation))
-        print(f"🔗 Receipt proof hash linked to ERC-8004 reputation flow: {linked_receipt_hash}")
-        print(
-            "ℹ️  To post on-chain feedback, set NEXUS_LEDGER_PRIVATE_KEY and call "
-            "agent.rate_counterparty(countersigned_receipt, rating=5, comment='Verified delivery')"
-        )
-    except Exception as exc:
-        print(f"⚠️  ERC-8004 read failed (network or RPC unavailable): {exc}")
-
-    print("\n✨ No server required. No tokens. Just signed proof.")
+    print("\nNexus Ledger v4.0 complete: multi-relay, live transport, typed chains, encrypted receipts, trust scoring.")
 
 
 if __name__ == "__main__":
