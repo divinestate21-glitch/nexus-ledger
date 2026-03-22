@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Relay Web Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tweetnacl-util@0.15.1/nacl-util.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --panel: rgba(18, 22, 34, 0.55);
+      --panel-border: rgba(103, 232, 249, 0.22);
+      --accent: #22d3ee;
+      --accent-2: #67e8f9;
+      --text: #e6f8ff;
+      --muted: #9db6c6;
+      --ok: #10b981;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+    }
+
+    html, body {
+      min-height: 100%;
+      background: radial-gradient(circle at 15% 20%, rgba(34, 211, 238, 0.14), transparent 30%),
+                  radial-gradient(circle at 85% 80%, rgba(103, 232, 249, 0.12), transparent 26%),
+                  linear-gradient(140deg, #0a0a0f 0%, #0c111f 55%, #0a0a0f 100%);
+      color: var(--text);
+      font-family: Inter, sans-serif;
+    }
+
+    .glass {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .accent {
+      color: var(--accent-2);
+    }
+
+    .pill {
+      border: 1px solid rgba(103, 232, 249, 0.25);
+      background: rgba(34, 211, 238, 0.08);
+    }
+
+    .btn-primary {
+      background: linear-gradient(90deg, rgba(34, 211, 238, 0.88), rgba(103, 232, 249, 0.88));
+      color: #031018;
+      font-weight: 700;
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .tiny {
+      font-size: 0.72rem;
+      line-height: 1.05rem;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+    }
+
+    .input {
+      background: rgba(8, 14, 21, 0.7);
+      border: 1px solid rgba(103, 232, 249, 0.2);
+      color: var(--text);
+    }
+
+    .input:focus {
+      outline: none;
+      border-color: rgba(34, 211, 238, 0.8);
+      box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.2);
+    }
+  </style>
+</head>
+<body class="p-4 md:p-8">
+  <div class="max-w-7xl mx-auto space-y-4">
+    <header class="glass rounded-2xl p-5 md:p-6">
+      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+        <div>
+          <p class="uppercase tracking-[0.26em] text-cyan-300 tiny">Relay Demo</p>
+          <h1 class="text-3xl md:text-4xl font-black leading-tight">Agent Receipt Console</h1>
+          <p class="text-sm text-slate-300 mt-2">Relay: <span class="mono accent" id="relayUrl"></span></p>
+        </div>
+        <div class="flex flex-wrap gap-2 text-xs" id="statsBar"></div>
+      </div>
+    </header>
+
+    <main class="grid grid-cols-1 xl:grid-cols-12 gap-4">
+      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-4 space-y-4">
+        <h2 class="font-bold text-lg">Create Agent</h2>
+        <label class="block space-y-1">
+          <span class="text-sm text-slate-300">Agent Name</span>
+          <input id="agentName" class="input w-full rounded-xl px-3 py-2 text-sm" placeholder="Iris Node" />
+        </label>
+        <button id="createAgentBtn" class="btn-primary rounded-xl px-4 py-2 text-sm w-full">Generate Keys + DID + Register</button>
+        <div class="space-y-2 text-xs">
+          <div>
+            <p class="text-slate-300">DID</p>
+            <p id="myDid" class="mono break-all"></p>
+          </div>
+          <div>
+            <p class="text-slate-300">Public Key (base64)</p>
+            <p id="myPubKey" class="mono break-all"></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-4 space-y-4">
+        <h2 class="font-bold text-lg">Send Receipt</h2>
+        <label class="block space-y-1">
+          <span class="text-sm text-slate-300">To (DID)</span>
+          <input id="toDid" class="input w-full rounded-xl px-3 py-2 text-sm mono" placeholder="did:key:z..." />
+        </label>
+        <label class="block space-y-1">
+          <span class="text-sm text-slate-300">Receipt Payload (JSON)</span>
+          <textarea id="receiptPayload" class="input w-full rounded-xl px-3 py-2 text-sm mono min-h-[120px]">{"kind":"receipt","amount":1,"note":"Ack"}</textarea>
+        </label>
+        <button id="sendBtn" class="btn-primary rounded-xl px-4 py-2 text-sm w-full">Sign + Send</button>
+        <p id="sendStatus" class="text-xs text-slate-300"></p>
+      </section>
+
+      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-4 space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="font-bold text-lg">Online Agents</h2>
+          <span class="tiny text-slate-300">polling `/discover`</span>
+        </div>
+        <div id="agentsList" class="space-y-2 max-h-[360px] overflow-auto pr-1"></div>
+      </section>
+
+      <section class="glass rounded-2xl p-4 md:p-5 xl:col-span-12 space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="font-bold text-lg">Inbox</h2>
+          <span class="tiny text-slate-300">polling `/receive?did=...`</span>
+        </div>
+        <div id="inboxList" class="space-y-2 max-h-[420px] overflow-auto pr-1"></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const RELAY = "http://104.236.251.94:8765";
+    const state = {
+      keyPair: null,
+      did: "",
+      name: "",
+      pubkeyB64: "",
+      agents: [],
+      inbox: [],
+      health: null,
+      started: Date.now(),
+      pollTimer: null,
+      inboxTimer: null,
+    };
+
+    const el = {
+      relayUrl: document.getElementById("relayUrl"),
+      statsBar: document.getElementById("statsBar"),
+      agentName: document.getElementById("agentName"),
+      createAgentBtn: document.getElementById("createAgentBtn"),
+      myDid: document.getElementById("myDid"),
+      myPubKey: document.getElementById("myPubKey"),
+      toDid: document.getElementById("toDid"),
+      receiptPayload: document.getElementById("receiptPayload"),
+      sendBtn: document.getElementById("sendBtn"),
+      sendStatus: document.getElementById("sendStatus"),
+      agentsList: document.getElementById("agentsList"),
+      inboxList: document.getElementById("inboxList"),
+    };
+
+    const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    function base58Encode(bytes) {
+      if (!bytes || !bytes.length) return "";
+      let digits = [0];
+      for (let i = 0; i < bytes.length; i++) {
+        let carry = bytes[i];
+        for (let j = 0; j < digits.length; j++) {
+          const x = digits[j] * 256 + carry;
+          digits[j] = x % 58;
+          carry = (x / 58) | 0;
+        }
+        while (carry > 0) {
+          digits.push(carry % 58);
+          carry = (carry / 58) | 0;
+        }
+      }
+      let zeros = 0;
+      while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+      let result = "";
+      for (let i = 0; i < zeros; i++) result += "1";
+      for (let i = digits.length - 1; i >= 0; i--) result += BASE58_ALPHABET[digits[i]];
+      return result;
+    }
+
+    function didFromEd25519PubKey(pubKeyUint8) {
+      const prefix = new Uint8Array([0xed, 0x01]);
+      const prefixed = new Uint8Array(prefix.length + pubKeyUint8.length);
+      prefixed.set(prefix, 0);
+      prefixed.set(pubKeyUint8, prefix.length);
+      return "did:key:z" + base58Encode(prefixed);
+    }
+
+    function u8ToB64(u8) {
+      return nacl.util.encodeBase64(u8);
+    }
+
+    function b64ToU8(s) {
+      return nacl.util.decodeBase64(s);
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function formatAgo(ms) {
+      const sec = Math.floor(ms / 1000);
+      if (sec < 60) return sec + "s";
+      const min = Math.floor(sec / 60);
+      if (min < 60) return min + "m";
+      const hr = Math.floor(min / 60);
+      return hr + "h";
+    }
+
+    function setSendStatus(msg, level = "info") {
+      const cls = level === "ok" ? "text-emerald-300" : level === "bad" ? "text-rose-300" : "text-slate-300";
+      el.sendStatus.className = "text-xs " + cls;
+      el.sendStatus.textContent = msg;
+    }
+
+    function statPill(label, value, tone = "default") {
+      const toneCls = tone === "ok"
+        ? "text-emerald-300 border-emerald-400/30 bg-emerald-400/10"
+        : tone === "bad"
+          ? "text-rose-300 border-rose-400/30 bg-rose-400/10"
+          : "text-cyan-200 border-cyan-400/30 bg-cyan-400/10";
+      return `<span class="pill ${toneCls} tiny rounded-full px-3 py-1">${label}: <span class="font-bold">${value}</span></span>`;
+    }
+
+    function renderStats() {
+      const health = state.health || {};
+      const up = formatAgo(Date.now() - state.started);
+      const statusTone = health.status === "ok" || health.status === "healthy" ? "ok" : (health.status ? "bad" : "default");
+      el.statsBar.innerHTML = [
+        statPill("Uptime", up),
+        statPill("Relay", health.status || "unknown", statusTone),
+        statPill("Registered", health.agents_registered ?? "-"),
+        statPill("Pending", health.pending_messages ?? "-"),
+        statPill("Discovered", state.agents.length),
+        statPill("Inbox", state.inbox.length),
+      ].join("");
+    }
+
+    function renderAgentIdentity() {
+      el.myDid.textContent = state.did || "Not created";
+      el.myPubKey.textContent = state.pubkeyB64 || "Not created";
+    }
+
+    function renderAgents() {
+      if (!state.agents.length) {
+        el.agentsList.innerHTML = '<p class="text-sm text-slate-300">No agents discovered.</p>';
+        return;
+      }
+
+      el.agentsList.innerHTML = state.agents.map((a) => {
+        const self = a.did === state.did;
+        const cardTone = self ? "border-cyan-300/40 bg-cyan-400/10" : "border-cyan-900/40 bg-slate-900/30";
+        return `
+          <article class="rounded-xl border ${cardTone} p-3 space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <p class="font-semibold text-sm">${escapeHtml(a.name || "Unnamed")}</p>
+              ${self ? '<span class="tiny text-cyan-200 pill rounded-full px-2 py-0.5">You</span>' : ""}
+            </div>
+            <p class="mono tiny break-all text-cyan-100/90">${escapeHtml(a.did || "")}</p>
+            <p class="tiny text-slate-300 break-all">${escapeHtml(a.pubkey || "")}</p>
+            <div class="flex gap-2 pt-1">
+              <button data-did="${escapeHtml(a.did || "")}" class="pick-did tiny rounded-lg px-2 py-1 border border-cyan-400/30 hover:bg-cyan-500/10">Use DID</button>
+            </div>
+          </article>
+        `;
+      }).join("");
+
+      document.querySelectorAll(".pick-did").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          el.toDid.value = btn.getAttribute("data-did") || "";
+        });
+      });
+    }
+
+    function verifyEnvelope(envelope) {
+      try {
+        const signatureB64 = envelope.signature;
+        const signerPubB64 = envelope.pubkey;
+        if (!signatureB64 || !signerPubB64) {
+          return { ok: false, reason: "missing signature or pubkey" };
+        }
+        const unsigned = { ...envelope };
+        delete unsigned.signature;
+        const msg = nacl.util.decodeUTF8(JSON.stringify(unsigned));
+        const sig = b64ToU8(signatureB64);
+        const pub = b64ToU8(signerPubB64);
+        const ok = nacl.sign.detached.verify(msg, sig, pub);
+        return { ok, reason: ok ? "valid" : "invalid signature" };
+      } catch (err) {
+        return { ok: false, reason: err && err.message ? err.message : "verification error" };
+      }
+    }
+
+    function renderInbox() {
+      if (!state.inbox.length) {
+        el.inboxList.innerHTML = '<p class="text-sm text-slate-300">Inbox empty.</p>';
+        return;
+      }
+
+      el.inboxList.innerHTML = state.inbox.map((msg, i) => {
+        const env = msg && msg.envelope ? msg.envelope : msg;
+        const v = verifyEnvelope(env || {});
+        const tone = v.ok ? "border-emerald-400/35 bg-emerald-500/10" : "border-rose-400/35 bg-rose-500/10";
+        const badge = v.ok ? '<span class="tiny rounded-full px-2 py-0.5 border border-emerald-400/40 text-emerald-300">Signature valid</span>' : `<span class="tiny rounded-full px-2 py-0.5 border border-rose-400/40 text-rose-300">Invalid: ${escapeHtml(v.reason)}</span>`;
+        return `
+          <article class="rounded-xl border ${tone} p-3 space-y-2">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="tiny text-slate-200">Message #${i + 1}</p>
+              ${badge}
+            </div>
+            <p class="tiny text-slate-300">From: <span class="mono break-all">${escapeHtml(env.from || "unknown")}</span></p>
+            <p class="tiny text-slate-300">Type: <span class="mono">${escapeHtml(env.type || "-")}</span></p>
+            <p class="tiny text-slate-300">Timestamp: <span class="mono">${escapeHtml(env.timestamp || "-")}</span></p>
+            <pre class="tiny mono whitespace-pre-wrap break-words bg-slate-950/55 border border-cyan-900/40 rounded-lg p-2">${escapeHtml(JSON.stringify(env, null, 2))}</pre>
+          </article>
+        `;
+      }).join("");
+    }
+
+    async function getHealth() {
+      const res = await fetch(RELAY + "/health");
+      if (!res.ok) throw new Error("Health check failed (" + res.status + ")");
+      state.health = await res.json();
+      renderStats();
+    }
+
+    async function discoverAgents() {
+      const res = await fetch(RELAY + "/discover");
+      if (!res.ok) throw new Error("Discover failed (" + res.status + ")");
+      const data = await res.json();
+      state.agents = Array.isArray(data.agents) ? data.agents : [];
+      renderAgents();
+      renderStats();
+    }
+
+    async function registerAgent() {
+      const name = (el.agentName.value || "").trim();
+      if (!name) throw new Error("Agent name is required.");
+
+      const keyPair = nacl.sign.keyPair();
+      const did = didFromEd25519PubKey(keyPair.publicKey);
+      const pubkeyB64 = u8ToB64(keyPair.publicKey);
+
+      const body = { did, name, pubkey: pubkeyB64 };
+      const res = await fetch(RELAY + "/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error("Register failed (" + res.status + "): " + txt);
+      }
+
+      state.keyPair = keyPair;
+      state.did = did;
+      state.name = name;
+      state.pubkeyB64 = pubkeyB64;
+      renderAgentIdentity();
+
+      await Promise.all([discoverAgents(), getHealth()]);
+      startInboxPolling();
+    }
+
+    async function sendReceipt() {
+      if (!state.keyPair || !state.did) throw new Error("Create/register an agent first.");
+      const to = (el.toDid.value || "").trim();
+      if (!to) throw new Error("Recipient DID is required.");
+
+      let payload;
+      try {
+        payload = JSON.parse(el.receiptPayload.value || "{}");
+      } catch (err) {
+        throw new Error("Payload must be valid JSON.");
+      }
+
+      const envelope = {
+        type: "receipt",
+        from: state.did,
+        from_name: state.name,
+        pubkey: state.pubkeyB64,
+        to,
+        timestamp: new Date().toISOString(),
+        nonce: nacl.util.encodeBase64(nacl.randomBytes(16)),
+        payload,
+      };
+
+      const bytes = nacl.util.decodeUTF8(JSON.stringify(envelope));
+      const signature = nacl.sign.detached(bytes, state.keyPair.secretKey);
+      envelope.signature = u8ToB64(signature);
+
+      const res = await fetch(RELAY + "/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to, envelope }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error("Send failed (" + res.status + "): " + txt);
+      }
+
+      setSendStatus("Receipt sent.", "ok");
+      await getHealth();
+    }
+
+    async function pollInbox() {
+      if (!state.did) return;
+      const url = RELAY + "/receive?did=" + encodeURIComponent(state.did);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Receive failed (" + res.status + ")");
+      const data = await res.json();
+      state.inbox = Array.isArray(data.messages) ? data.messages : [];
+      renderInbox();
+      renderStats();
+    }
+
+    function startMainPolling() {
+      clearInterval(state.pollTimer);
+      state.pollTimer = setInterval(async () => {
+        try {
+          await Promise.all([discoverAgents(), getHealth()]);
+        } catch (_) {
+          renderStats();
+        }
+      }, 7000);
+    }
+
+    function startInboxPolling() {
+      clearInterval(state.inboxTimer);
+      state.inboxTimer = setInterval(async () => {
+        try {
+          await pollInbox();
+        } catch (_) {
+          renderStats();
+        }
+      }, 5000);
+    }
+
+    function wireEvents() {
+      el.createAgentBtn.addEventListener("click", async () => {
+        try {
+          el.createAgentBtn.disabled = true;
+          setSendStatus("Creating and registering agent...");
+          await registerAgent();
+          setSendStatus("Agent ready.", "ok");
+        } catch (err) {
+          setSendStatus(err && err.message ? err.message : "Failed to create agent", "bad");
+        } finally {
+          el.createAgentBtn.disabled = false;
+        }
+      });
+
+      el.sendBtn.addEventListener("click", async () => {
+        try {
+          el.sendBtn.disabled = true;
+          setSendStatus("Signing and sending...");
+          await sendReceipt();
+        } catch (err) {
+          setSendStatus(err && err.message ? err.message : "Send failed", "bad");
+        } finally {
+          el.sendBtn.disabled = false;
+        }
+      });
+    }
+
+    async function boot() {
+      el.relayUrl.textContent = RELAY;
+      renderAgentIdentity();
+      renderAgents();
+      renderInbox();
+      renderStats();
+      wireEvents();
+      startMainPolling();
+
+      try {
+        await Promise.all([discoverAgents(), getHealth()]);
+      } catch (err) {
+        setSendStatus("Ready. Relay fetches will run when allowed by your browser/network.");
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
