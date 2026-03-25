@@ -1,0 +1,77 @@
+Business Source License 1.1
+
+Parameters
+
+Licensor:             Vickson Enterprises / Nexus Protocol
+Licensed Work:        Nexus Protocol
+Additional Use Grant: Non-commercial use and evaluation permitted without a commercial license. Commercial use requires written agreement from Nexus Protocol.
+Change Date:          2030-03-18
+Change License:       Apache License, Version 2.0
+
+Terms
+
+Business Source License 1.1
+
+Copyright (c) 2026, Vickson Enterprises / Nexus Protocol
+
+Use of this software is governed by the Business Source License included in this file.
+
+Change Date: 2030-03-18
+
+On the Change Date, or the fourth anniversary of the first publicly available distribution of a specific version of the Licensed Work under this License, whichever comes first, the Licensor grants rights under the terms of the Change License.
+
+If your use does not qualify under the Additional Use Grant above, you must obtain a separate written commercial license from Nexus Protocol before using this software for commercial purposes.
+
+---
+
+Business Source License 1.1
+
+License text copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
+“Business Source License” is a trademark of MariaDB Corporation Ab.
+
+=======================================================================
+Business Source License 1.1
+
+Larger Works
+
+You may create a Larger Work by combining the Licensed Work with other code
+not governed by the terms of this License and distribute the Larger Work as a
+single product. In that case, You must make sure the requirements of this
+License are fulfilled for the Licensed Work.
+
+Notice
+
+The Business Source License (this document, or the “License”) is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.
+
+License text
+
+Copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, is permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions, and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions, and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS”
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+=======================================================================

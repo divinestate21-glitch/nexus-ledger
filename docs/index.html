@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus Ledger — The Trust Layer for AI Agents</title>
+    <meta name="description" content="Every AI agent that exists needs to trust every other AI agent. Nexus Ledger is how that happens.">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            line-height: 1.7;
+        }
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 2rem;
+            background: radial-gradient(ellipse at center, #0d1b2a 0%, #0a0a0a 70%);
+        }
+        .hero h1 {
+            font-size: 4rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #00bcd4, #ffb300);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 1rem;
+        }
+        .hero .tagline {
+            font-size: 1.5rem;
+            color: #999;
+            max-width: 600px;
+            margin-bottom: 2rem;
+        }
+        .hero .pitch {
+            font-size: 1.1rem;
+            color: #ccc;
+            max-width: 700px;
+            margin-bottom: 3rem;
+        }
+        .install-box {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 1.2rem 2.5rem;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 1.2rem;
+            color: #00bcd4;
+            margin-bottom: 3rem;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        .install-box:hover {
+            border-color: #00bcd4;
+        }
+        .install-box::after {
+            content: ' 📋';
+            font-size: 0.9rem;
+        }
+        .badges {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .badge {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+            color: #ffb300;
+        }
+        .section {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 5rem 2rem;
+        }
+        .section h2 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            color: #fff;
+        }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+        .feature {
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 12px;
+            padding: 2rem;
+            transition: border-color 0.3s;
+        }
+        .feature:hover {
+            border-color: #00bcd4;
+        }
+        .feature .icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+        .feature h3 {
+            font-size: 1.2rem;
+            color: #fff;
+            margin-bottom: 0.5rem;
+        }
+        .feature p {
+            color: #888;
+            font-size: 0.95rem;
+        }
+        .code-section {
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            overflow-x: auto;
+        }
+        .code-section h3 {
+            color: #ffb300;
+            margin-bottom: 1rem;
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        pre {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.9rem;
+            color: #e0e0e0;
+            line-height: 1.8;
+        }
+        .keyword { color: #c792ea; }
+        .string { color: #c3e88d; }
+        .comment { color: #546e7a; }
+        .func { color: #82aaff; }
+        .var { color: #ffcb6b; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.5rem;
+            text-align: center;
+            margin: 3rem 0;
+        }
+        .stat-num {
+            font-size: 2.5rem;
+            font-weight: 800;
+            color: #00bcd4;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        .cta-section {
+            text-align: center;
+            padding: 5rem 2rem;
+            background: linear-gradient(180deg, #0a0a0a 0%, #0d1b2a 100%);
+        }
+        .cta-section h2 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            color: #fff;
+        }
+        .cta-section p {
+            color: #888;
+            margin-bottom: 2rem;
+            font-size: 1.1rem;
+        }
+        .btn {
+            display: inline-block;
+            padding: 1rem 2.5rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            text-decoration: none;
+            margin: 0.5rem;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #00bcd4;
+            color: #000;
+        }
+        .btn-primary:hover {
+            background: #00e5ff;
+        }
+        .btn-secondary {
+            background: transparent;
+            color: #ffb300;
+            border: 1px solid #ffb300;
+        }
+        .btn-secondary:hover {
+            background: #ffb300;
+            color: #000;
+        }
+        footer {
+            text-align: center;
+            padding: 3rem 2rem;
+            color: #444;
+            font-size: 0.85rem;
+        }
+        footer a { color: #00bcd4; text-decoration: none; }
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 2.5rem; }
+            .hero .tagline { font-size: 1.1rem; }
+            .stats { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+
+<section class="hero">
+    <h1>Nexus Ledger</h1>
+    <p class="tagline">Your agents already work. Nexus makes them trustworthy.</p>
+    <p class="pitch">You already have AI agents. They already do great work. But when Agent A hires Agent B — how do you prove the work got done? How do you know who to trust? Nexus Ledger adds a trust layer to your existing agents: signed receipts, encrypted messaging, trust scores, and Ethereum anchoring. Drop it in. No rewrite needed.</p>
+    <div class="install-box" onclick="navigator.clipboard.writeText('pip install nexus-ledger')">
+        pip install nexus-ledger
+    </div>
+    <div class="badges">
+        <span class="badge">v4.2.0</span>
+        <span class="badge">21 Tests Passing</span>
+        <span class="badge">Ethereum Anchoring</span>
+        <span class="badge">Sybil Resistant</span>
+    </div>
+</section>
+
+<section class="section">
+    <h2>What it does</h2>
+    <div class="features">
+        <div class="feature">
+            <div class="icon">🔐</div>
+            <h3>Signed Receipts</h3>
+            <p>Every transaction is dual-signed with Ed25519 cryptography and hash-linked into an immutable receipt chain. Unfakeable proof that work was requested, accepted, delivered, and confirmed.</p>
+        </div>
+        <div class="feature">
+            <div class="icon">🔒</div>
+            <h3>E2E Encryption</h3>
+            <p>NaCl box encryption with Ed25519→Curve25519 key derivation. Agents communicate privately — only the intended recipient can decrypt.</p>
+        </div>
+        <div class="feature">
+            <div class="icon">⭐</div>
+            <h3>Trust Scores</h3>
+            <p>Local trust scores (0.0→1.0) built from real receipt history. Sybil-resistant with diversity weighting, temporal decay, and counterparty minimums.</p>
+        </div>
+        <div class="feature">
+            <div class="icon">⛓️</div>
+            <h3>Ethereum Anchoring</h3>
+            <p>Anchor receipt hashes to Base L2, Ethereum mainnet, or Sepolia. Immutable on-chain proof that the transaction happened.</p>
+        </div>
+        <div class="feature">
+            <div class="icon">🌐</div>
+            <h3>Relay Network</h3>
+            <p>HTTP + WebSocket relay server for agent discovery, registration, and message routing. Multi-relay failover built in.</p>
+        </div>
+        <div class="feature">
+            <div class="icon">🔍</div>
+            <h3>DID Identity</h3>
+            <p>Every agent gets a cryptographic DID:key identity. Unique, portable, unfakeable. ERC-8004 on-chain identity integration.</p>
+        </div>
+    </div>
+</section>
+
+<section class="section">
+    <h2>5 lines to add trust to your agents</h2>
+    <div class="code-section">
+        <h3>Create agents & transact</h3>
+        <pre><span class="keyword">from</span> <span class="var">nexus_ledger</span> <span class="keyword">import</span> <span class="var">Agent</span>
+
+<span class="comment"># Wrap your existing agents with Nexus identity</span>
+<span class="var">alice</span> = <span class="func">Agent</span>(<span class="string">"Alice"</span>)
+<span class="var">bob</span> = <span class="func">Agent</span>(<span class="string">"Bob"</span>)
+
+<span class="comment"># Alice hires Bob</span>
+<span class="var">alice</span>.<span class="func">request_task</span>(<span class="string">"Bob"</span>, description=<span class="string">"market research"</span>, budget=<span class="var">100</span>)
+
+<span class="comment"># Check trust score</span>
+<span class="keyword">print</span>(<span class="var">alice</span>.<span class="func">trust_score</span>())  <span class="comment"># → 0.46</span>
+
+<span class="comment"># Anchor to Ethereum</span>
+<span class="var">alice</span>.<span class="func">anchor_to_eth</span>(chain=<span class="string">"base"</span>)</pre>
+    </div>
+    <div class="code-section">
+        <h3>Full task lifecycle</h3>
+        <pre><span class="comment"># TaskRequest → TaskAccepted → TaskDelivered → TaskConfirmed</span>
+<span class="var">alice</span>.<span class="func">request_task</span>(<span class="string">"Bob"</span>, description=<span class="string">"competitor analysis"</span>, budget=<span class="var">50</span>)
+<span class="var">bob</span>.<span class="func">accept_task</span>(<span class="string">"Alice"</span>, task_id=<span class="string">"deal-001"</span>, estimated_delivery=<span class="string">"2026-03-25"</span>)
+<span class="var">bob</span>.<span class="func">deliver_task</span>(<span class="string">"deal-001"</span>, artifact_hash=<span class="string">"sha256:report_v1"</span>, to=<span class="string">"Alice"</span>)
+<span class="var">alice</span>.<span class="func">confirm_task</span>(<span class="string">"deal-001"</span>, rating=<span class="var">5</span>, feedback=<span class="string">"Outstanding work"</span>, to=<span class="string">"Bob"</span>)</pre>
+    </div>
+    <div class="code-section">
+        <h3>CLI</h3>
+        <pre><span class="comment"># Initialize agent identity</span>
+$ nexus-ledger init
+
+<span class="comment"># Check trust score</span>
+$ nexus-ledger trust
+
+<span class="comment"># View receipt chain</span>
+$ nexus-ledger task-chain deal-001
+
+<span class="comment"># Anchor to Ethereum</span>
+$ nexus-ledger anchor --chain base
+
+<span class="comment"># Run the relay server</span>
+$ python relay_server.py --port 8765</pre>
+    </div>
+</section>
+
+<section class="section">
+    <div class="stats">
+        <div>
+            <div class="stat-num">21</div>
+            <div class="stat-label">Tests Passing</div>
+        </div>
+        <div>
+            <div class="stat-num">2</div>
+            <div class="stat-label">Chains Supported</div>
+        </div>
+        <div>
+            <div class="stat-num">10</div>
+            <div class="stat-label">CLI Commands</div>
+        </div>
+        <div>
+            <div class="stat-num">4.2.0</div>
+            <div class="stat-label">Latest Version</div>
+        </div>
+    </div>
+</section>
+
+<section class="cta-section">
+    <h2>Add trust to any agent. In 5 lines of code.</h2>
+    <p>Works with LangChain, CrewAI, AutoGen, OpenClaw, or any Python agent.<br>No vendor lock-in. No rewrite. Just trust.</p>
+    <a href="https://pypi.org/project/nexus-ledger/" class="btn btn-primary">Install from PyPI</a>
+    <a href="https://github.com/divinestate21-glitch/nexus-ledger" class="btn btn-secondary">View on GitHub</a>
+</section>
+
+<footer>
+    <p>Built by <a href="https://x.com/bunnyhop0veru">Mercury & Vickson</a> of Vickson Enterprises ☿️</p>
+    <p>The trust layer the agentic web needs.</p>
+</footer>
+
+</body>
+</html>
