@@ -64,6 +64,30 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_verify_dep(args: argparse.Namespace) -> int:
+    """Verify a package dependency against recorded receipts."""
+    agent = _build_agent(args)
+    against = getattr(args, "against", "registry") or "registry"
+    ok = agent.verify_dependency(args.package, args.version, against=against)
+    status = "SAFE" if ok else "ALERT"
+    _print({
+        "status": status,
+        "package": args.package,
+        "version": args.version,
+        "registry": getattr(args, "registry", ""),
+        "verified": ok,
+    })
+    return 0 if ok else 1
+
+
+def cmd_audit_deps(args: argparse.Namespace) -> int:
+    """List all dependency installation receipts."""
+    agent = _build_agent(args)
+    receipts = agent.dependency_audit()
+    _print(receipts)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexus-ledger")
     parser.add_argument("--name", default="Mercury")
@@ -95,6 +119,27 @@ def build_parser() -> argparse.ArgumentParser:
     verify_cmd = subparsers.add_parser("verify", help="verify receipt signatures")
     verify_cmd.add_argument("receipt_json")
     verify_cmd.set_defaults(func=cmd_verify)
+
+    # Supply Chain Trust commands (v5.0)
+    verify_dep_cmd = subparsers.add_parser(
+        "verify-dep",
+        help="verify a package dependency hash against recorded receipts",
+    )
+    verify_dep_cmd.add_argument("--package", required=True, help="Package name (e.g., axios)")
+    verify_dep_cmd.add_argument("--version", required=True, help="Package version (e.g., 1.14.1)")
+    verify_dep_cmd.add_argument("--registry", default="", help="Registry name (e.g., npm, pypi)")
+    verify_dep_cmd.add_argument(
+        "--against",
+        default="registry",
+        help="Verification mode: 'registry' (default) or a specific hash",
+    )
+    verify_dep_cmd.set_defaults(func=cmd_verify_dep)
+
+    audit_deps_cmd = subparsers.add_parser(
+        "audit-deps",
+        help="list all recorded dependency installation receipts",
+    )
+    audit_deps_cmd.set_defaults(func=cmd_audit_deps)
 
     return parser
 

@@ -20,6 +20,7 @@ from .proof_anchor import anchor as anchor_proof
 from .proof_anchor import verify as verify_proof
 from .protocol import generate_keypair, sign, verify
 from .receipt_types import TaskAccepted, TaskConfirmed, TaskDelivered, TaskDisputed, TaskRequest, new_task_id
+from .supply_chain import SupplyChainModule
 from .relay_manager import DEFAULT_RELAYS, RelayManager
 from .transport import (
     HTTPTransport,
@@ -102,6 +103,7 @@ class Agent:
         self._receipt_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         self._live_connection: Optional[LiveConnection] = None
         self._trust = TrustScorer()
+        self._supply_chain = SupplyChainModule(self._ledger, self.public_key)
         self._register_on_relay_safely()
 
     @staticmethod
@@ -757,3 +759,71 @@ class Agent:
     def get_trust_report(self, agent_pubkey: str) -> Dict[str, Any]:
         report = self._trust.build_report(agent_pubkey, self._ledger.get_receipts())
         return report
+
+    # ── Supply Chain Trust (v5.0) ──────────────────────────────────────────
+
+    def record_dependency(
+        self,
+        package: str,
+        version: str,
+        registry: str,
+        source_hash: str,
+        expected_hash: str,
+        install_command: Optional[str] = None,
+        environment: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a dependency installation with cryptographic proof.
+
+        Args:
+            package: Package name (e.g., "axios")
+            version: Package version (e.g., "1.7.2")
+            registry: Registry source (e.g., "npm", "pypi", "cargo")
+            source_hash: SHA-256 hash of the downloaded tarball/artifact
+            expected_hash: SHA-256 hash published by the registry
+            install_command: The install command used (optional)
+            environment: Environment description (optional)
+
+        Returns:
+            A receipt dict with all dependency installation details.
+            receipt["data"]["hash_match"] is True if the package is safe.
+        """
+        return self._supply_chain.record_dependency(
+            package=package,
+            version=version,
+            registry=registry,
+            source_hash=source_hash,
+            expected_hash=expected_hash,
+            install_command=install_command,
+            environment=environment,
+        )
+
+    def verify_dependency(
+        self,
+        package: str,
+        version: str,
+        against: str = "registry",
+    ) -> bool:
+        """Verify a previously recorded dependency.
+
+        Args:
+            package: Package name to look up
+            version: Package version to check
+            against: Verification mode — "registry" (default) checks stored
+                     hash_match; a hex hash string compares against that hash.
+
+        Returns:
+            True if the dependency is verified safe, False otherwise.
+        """
+        return self._supply_chain.verify_dependency(
+            package=package,
+            version=version,
+            against=against,
+        )
+
+    def dependency_audit(self) -> List[Dict[str, Any]]:
+        """Return all dependency installation receipts for this agent.
+
+        Returns:
+            List of receipt dicts for all recorded dependencies.
+        """
+        return self._supply_chain.dependency_audit()

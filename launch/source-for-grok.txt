@@ -1,0 +1,2958 @@
+# Nexus Ledger v4.2.2 — Full Source Code for Testing
+# GitHub: https://github.com/divinestate21-glitch/nexus-ledger
+# PyPI: pip install nexus-ledger
+
+========== nexus_ledger/__init__.py ==========
+from .agent import Agent
+from .receipt_types import TaskAccepted, TaskConfirmed, TaskDelivered, TaskDisputed, TaskRequest
+
+__version__ = "4.0.0"
+
+__all__ = [
+    "Agent",
+    "TaskRequest",
+    "TaskAccepted",
+    "TaskDelivered",
+    "TaskConfirmed",
+    "TaskDisputed",
+    "__version__",
+]
+
+========== nexus_ledger/protocol.py ==========
+"""Minimal signing protocol for Nexus Ledger."""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, Tuple
+
+from nacl.exceptions import BadSignatureError
+from nacl.signing import SigningKey, VerifyKey
+
+
+JsonDict = Dict[str, Any]
+
+
+def _canonical_json(data_dict: JsonDict) -> bytes:
+    return json.dumps(data_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def generate_keypair() -> Tuple[str, str]:
+    """Return (private_key_hex, public_key_hex)."""
+    signing_key = SigningKey.generate()
+    verify_key = signing_key.verify_key
+    return signing_key.encode().hex(), verify_key.encode().hex()
+
+
+def sign(private_key: str, data_dict: JsonDict) -> str:
+    """Sign a JSON-serializable dict and return hex signature."""
+    message = _canonical_json(data_dict)
+    signature = SigningKey(bytes.fromhex(private_key)).sign(message).signature
+    return signature.hex()
+
+
+def verify(public_key: str, data_dict: JsonDict, signature: str) -> bool:
+    """Verify signature for a dict."""
+    message = _canonical_json(data_dict)
+    try:
+        VerifyKey(bytes.fromhex(public_key)).verify(message, bytes.fromhex(signature))
+        return True
+    except (BadSignatureError, ValueError):
+        return False
+
+========== nexus_ledger/crypto.py ==========
+"""Receipt encryption helpers using NaCl box over X25519 keys."""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict
+
+from nacl import utils
+from nacl.public import Box
+from nacl.signing import SigningKey, VerifyKey
+
+
+JsonDict = Dict[str, Any]
+
+
+def _signing_key(private_ed25519_hex: str) -> SigningKey:
+    return SigningKey(bytes.fromhex(str(private_ed25519_hex)))
+
+
+def _verify_key(public_ed25519_hex: str) -> VerifyKey:
+    return VerifyKey(bytes.fromhex(str(public_ed25519_hex)))
+
+
+def encrypt_payload(payload: JsonDict, sender_private_ed25519_hex: str, recipient_public_ed25519_hex: str) -> JsonDict:
+    sender_signing = _signing_key(sender_private_ed25519_hex)
+    sender_curve_private = sender_signing.to_curve25519_private_key()
+    recipient_curve_public = _verify_key(recipient_public_ed25519_hex).to_curve25519_public_key()
+
+    box = Box(sender_curve_private, recipient_curve_public)
+    nonce = utils.random(Box.NONCE_SIZE)
+    message = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ciphertext = box.encrypt(message, nonce).ciphertext
+
+    return {
+        "encrypted": True,
+        "algorithm": "nacl.box.x25519-xsalsa20-poly1305",
+        "sender_pubkey": sender_signing.verify_key.encode().hex(),
+        "recipient_pubkey": str(recipient_public_ed25519_hex),
+        "nonce": nonce.hex(),
+        "ciphertext": ciphertext.hex(),
+    }
+
+
+def decrypt_payload(encrypted_envelope: JsonDict, recipient_private_ed25519_hex: str) -> JsonDict:
+    required = ["encrypted", "sender_pubkey", "nonce", "ciphertext"]
+    missing = [field for field in required if field not in encrypted_envelope]
+    if missing:
+        raise ValueError(f"Encrypted envelope missing required fields: {', '.join(missing)}")
+
+    sender_pubkey = str(encrypted_envelope["sender_pubkey"])
+    nonce = bytes.fromhex(str(encrypted_envelope["nonce"]))
+    ciphertext = bytes.fromhex(str(encrypted_envelope["ciphertext"]))
+
+    recipient_curve_private = _signing_key(recipient_private_ed25519_hex).to_curve25519_private_key()
+    sender_curve_public = _verify_key(sender_pubkey).to_curve25519_public_key()
+
+    box = Box(recipient_curve_private, sender_curve_public)
+    plaintext = box.decrypt(ciphertext, nonce)
+    decoded = json.loads(plaintext.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("Decrypted payload must be a JSON object")
+    return decoded
+
+========== nexus_ledger/ledger.py ==========
+"""Local signed activity log stored in SQLite."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from nacl.signing import SigningKey
+
+from .protocol import sign
+
+
+JsonDict = Dict[str, Any]
+AgentKey = Union[str, Tuple[str, str], Dict[str, str]]
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _public_from_private(private_key: str) -> str:
+    return SigningKey(bytes.fromhex(private_key)).verify_key.encode().hex()
+
+
+def _canonical_json(data_dict: JsonDict) -> str:
+    return json.dumps(data_dict, sort_keys=True, separators=(",", ":"))
+
+
+def receipt_signing_payload(receipt: JsonDict) -> JsonDict:
+    return {
+        "timestamp": str(receipt["timestamp"]),
+        "event_type": str(receipt["event_type"]),
+        "data": receipt["data"],
+        "agent_a_pubkey": str(receipt["agent_a_pubkey"]),
+        "agent_b_pubkey": str(receipt["agent_b_pubkey"]),
+        "parent_receipt_hash": str(receipt.get("parent_receipt_hash", "")),
+    }
+
+
+def receipt_proof_hash(receipt: JsonDict) -> str:
+    stored_payload = {
+        "timestamp": str(receipt["timestamp"]),
+        "event_type": str(receipt["event_type"]),
+        "data": receipt["data"],
+        "parent_receipt_hash": str(receipt.get("parent_receipt_hash", "")),
+        "agent_a_pubkey": str(receipt["agent_a_pubkey"]),
+        "agent_a_signature": str(receipt["agent_a_signature"]),
+        "agent_b_pubkey": str(receipt["agent_b_pubkey"]),
+        "agent_b_signature": str(receipt["agent_b_signature"]),
+    }
+    return hashlib.sha256(_canonical_json(stored_payload).encode("utf-8")).hexdigest()
+
+
+def _resolve_keys(agent_key: AgentKey) -> Tuple[str, str]:
+    if isinstance(agent_key, tuple) and len(agent_key) == 2:
+        private_key, public_key = agent_key
+        return str(private_key), str(public_key)
+
+    if isinstance(agent_key, dict):
+        private_key = str(agent_key.get("private_key", ""))
+        public_key = str(agent_key.get("public_key", ""))
+        if private_key and not public_key:
+            public_key = _public_from_private(private_key)
+        if not private_key or not public_key:
+            raise ValueError("agent_key dict must contain private_key and public_key")
+        return private_key, public_key
+
+    if isinstance(agent_key, str):
+        private_key = agent_key
+        return private_key, _public_from_private(private_key)
+
+    raise TypeError("agent_key must be private key string, (private, public), or key dict")
+
+
+def _resolve_counterparty(counterparty_key: Optional[AgentKey]) -> Optional[str]:
+    if counterparty_key is None:
+        return None
+    if isinstance(counterparty_key, tuple) and len(counterparty_key) == 2:
+        return str(counterparty_key[1])
+    if isinstance(counterparty_key, dict):
+        public_key = str(counterparty_key.get("public_key", ""))
+        if public_key:
+            return public_key
+        private_key = str(counterparty_key.get("private_key", ""))
+        return _public_from_private(private_key) if private_key else None
+    return str(counterparty_key)
+
+
+class Ledger:
+    def __init__(self, path: str = "nexus.db") -> None:
+        self.path = path
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_db()
+
+    def _init_db(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                agent_pubkey TEXT NOT NULL,
+                counterparty_pubkey TEXT,
+                event_type TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                signature TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                task_id TEXT,
+                parent_receipt_hash TEXT,
+                agent_a_pubkey TEXT NOT NULL,
+                agent_a_signature TEXT NOT NULL,
+                agent_b_pubkey TEXT NOT NULL,
+                agent_b_signature TEXT NOT NULL,
+                proof_hash TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_agent ON ledger(agent_pubkey)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_timestamp ON ledger(timestamp)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_a ON receipts(agent_a_pubkey)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_b ON receipts(agent_b_pubkey)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_timestamp ON receipts(timestamp)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_task_id ON receipts(task_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_receipts_parent_hash ON receipts(parent_receipt_hash)")
+        self._add_missing_receipt_columns()
+        self._conn.commit()
+
+    def _add_missing_receipt_columns(self) -> None:
+        cols = self._conn.execute("PRAGMA table_info(receipts)").fetchall()
+        names = {str(col["name"]) for col in cols}
+        if "task_id" not in names:
+            self._conn.execute("ALTER TABLE receipts ADD COLUMN task_id TEXT")
+        if "parent_receipt_hash" not in names:
+            self._conn.execute("ALTER TABLE receipts ADD COLUMN parent_receipt_hash TEXT")
+
+    def log(
+        self,
+        agent_key: AgentKey,
+        event_type: str,
+        data: JsonDict,
+        counterparty_key: Optional[AgentKey] = None,
+    ) -> JsonDict:
+        private_key, public_key = _resolve_keys(agent_key)
+        counterparty_pubkey = _resolve_counterparty(counterparty_key)
+        timestamp = _utc_timestamp()
+
+        signed_payload: JsonDict = {
+            "timestamp": timestamp,
+            "agent_pubkey": public_key,
+            "counterparty_pubkey": counterparty_pubkey,
+            "event_type": str(event_type),
+            "data": data,
+        }
+        signature = sign(private_key, signed_payload)
+
+        cur = self._conn.execute(
+            """
+            INSERT INTO ledger (
+                timestamp, agent_pubkey, counterparty_pubkey, event_type, data_json, signature
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp,
+                public_key,
+                counterparty_pubkey,
+                str(event_type),
+                json.dumps(data, sort_keys=True),
+                signature,
+            ),
+        )
+        self._conn.commit()
+
+        return {
+            "id": int(cur.lastrowid),
+            "timestamp": timestamp,
+            "agent_pubkey": public_key,
+            "counterparty_pubkey": counterparty_pubkey,
+            "event_type": str(event_type),
+            "data_json": json.dumps(data, sort_keys=True),
+            "signature": signature,
+        }
+
+    def all(self) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, timestamp, agent_pubkey, counterparty_pubkey, event_type, data_json, signature
+            FROM ledger
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def by_agent(self, public_key: str) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, timestamp, agent_pubkey, counterparty_pubkey, event_type, data_json, signature
+            FROM ledger
+            WHERE agent_pubkey = ?
+            ORDER BY id ASC
+            """,
+            (public_key,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def store_receipt(self, receipt_dict: JsonDict) -> JsonDict:
+        required_fields = [
+            "timestamp",
+            "event_type",
+            "data",
+            "agent_a_pubkey",
+            "agent_a_signature",
+            "agent_b_pubkey",
+            "agent_b_signature",
+            "parent_receipt_hash",
+        ]
+        missing = [field for field in required_fields if field not in receipt_dict]
+        if missing:
+            raise ValueError(f"Receipt missing required fields: {', '.join(missing)}")
+
+        data = receipt_dict["data"]
+        if not isinstance(data, dict):
+            raise ValueError("receipt['data'] must be a dict")
+
+        normalized_receipt = {
+            "timestamp": str(receipt_dict["timestamp"]),
+            "event_type": str(receipt_dict["event_type"]),
+            "data": data,
+            "task_id": str(data.get("task_id", "")).strip() or None,
+            "parent_receipt_hash": str(receipt_dict.get("parent_receipt_hash", "")),
+            "agent_a_pubkey": str(receipt_dict["agent_a_pubkey"]),
+            "agent_a_signature": str(receipt_dict["agent_a_signature"]),
+            "agent_b_pubkey": str(receipt_dict["agent_b_pubkey"]),
+            "agent_b_signature": str(receipt_dict["agent_b_signature"]),
+        }
+        proof_hash = str(receipt_dict.get("proof_hash") or receipt_proof_hash(normalized_receipt))
+
+        cur = self._conn.execute(
+            """
+            INSERT INTO receipts (
+                timestamp,
+                event_type,
+                data_json,
+                task_id,
+                parent_receipt_hash,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_receipt["timestamp"],
+                normalized_receipt["event_type"],
+                _canonical_json(data),
+                normalized_receipt["task_id"],
+                normalized_receipt["parent_receipt_hash"],
+                normalized_receipt["agent_a_pubkey"],
+                normalized_receipt["agent_a_signature"],
+                normalized_receipt["agent_b_pubkey"],
+                normalized_receipt["agent_b_signature"],
+                proof_hash,
+            ),
+        )
+        self._conn.commit()
+
+        return {
+            "id": int(cur.lastrowid),
+            "timestamp": normalized_receipt["timestamp"],
+            "event_type": normalized_receipt["event_type"],
+            "data_json": _canonical_json(data),
+            "task_id": normalized_receipt["task_id"],
+            "parent_receipt_hash": normalized_receipt["parent_receipt_hash"],
+            "agent_a_pubkey": normalized_receipt["agent_a_pubkey"],
+            "agent_a_signature": normalized_receipt["agent_a_signature"],
+            "agent_b_pubkey": normalized_receipt["agent_b_pubkey"],
+            "agent_b_signature": normalized_receipt["agent_b_signature"],
+            "proof_hash": proof_hash,
+        }
+
+    def get_receipts(self) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                event_type,
+                data_json,
+                task_id,
+                parent_receipt_hash,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            FROM receipts
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_receipts_with(self, counterparty_pubkey: str) -> List[JsonDict]:
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                event_type,
+                data_json,
+                task_id,
+                parent_receipt_hash,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            FROM receipts
+            WHERE agent_a_pubkey = ? OR agent_b_pubkey = ?
+            ORDER BY id ASC
+            """,
+            (counterparty_pubkey, counterparty_pubkey),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_task_chain(self, task_id: str) -> List[JsonDict]:
+        task = str(task_id).strip()
+        if not task:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                timestamp,
+                event_type,
+                data_json,
+                task_id,
+                parent_receipt_hash,
+                agent_a_pubkey,
+                agent_a_signature,
+                agent_b_pubkey,
+                agent_b_signature,
+                proof_hash
+            FROM receipts
+            WHERE task_id = ?
+            ORDER BY id ASC
+            """,
+            (task,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close(self) -> None:
+        self._conn.close()
+
+========== nexus_ledger/trust.py ==========
+"""Local trust scoring from receipt history."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from typing import Any, Dict, List
+
+
+JsonDict = Dict[str, Any]
+
+
+def _parse_time(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+class TrustScorer:
+    def build_report(self, agent_pubkey: str, rows: List[JsonDict]) -> JsonDict:
+        receipts = []
+        for row in rows:
+            if str(row.get("agent_a_pubkey")) != agent_pubkey and str(row.get("agent_b_pubkey")) != agent_pubkey:
+                continue
+            data = row.get("data_json")
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except json.JSONDecodeError:
+                    data = {}
+            receipts.append({**row, "data": data if isinstance(data, dict) else {}})
+
+        total = len(receipts)
+        delivered = [r for r in receipts if str(r.get("event_type")) == "TaskDelivered"]
+        confirmed = [r for r in receipts if str(r.get("event_type")) == "TaskConfirmed"]
+        disputed = [r for r in receipts if str(r.get("event_type")) == "TaskDisputed"]
+
+        on_time_count = 0
+        for row in delivered:
+            data = row.get("data", {})
+            deadline = _parse_time(data.get("deadline"))
+            delivered_at = _parse_time(data.get("delivered_at")) or _parse_time(row.get("timestamp"))
+            if deadline is None:
+                continue
+            if delivered_at is not None and delivered_at <= deadline:
+                on_time_count += 1
+
+        rated = [int(r.get("data", {}).get("rating")) for r in confirmed if str(r.get("data", {}).get("rating", "")).isdigit()]
+
+        on_time_rate = (on_time_count / len(delivered)) if delivered else 1.0
+        average_rating = (sum(rated) / len(rated)) if rated else 0.0
+        rating_norm = min(max(average_rating / 5.0, 0.0), 1.0)
+        dispute_rate = (len(disputed) / total) if total else 0.0
+        volume_norm = min(total / 20.0, 1.0)
+        dispute_component = max(0.0, 1.0 - dispute_rate)
+
+        score = (0.2 * volume_norm) + (0.3 * on_time_rate) + (0.4 * rating_norm) + (0.1 * dispute_component)
+        score = min(max(score, 0.0), 1.0)
+
+        return {
+            "agent_pubkey": agent_pubkey,
+            "score": round(score, 4),
+            "factors": {
+                "total_receipts": total,
+                "delivered_receipts": len(delivered),
+                "confirmed_receipts": len(confirmed),
+                "disputed_receipts": len(disputed),
+                "on_time_delivery_rate": round(on_time_rate, 4),
+                "average_rating": round(average_rating, 4),
+                "dispute_rate": round(dispute_rate, 4),
+                "volume_normalized": round(volume_norm, 4),
+            },
+            "weights": {
+                "volume": 0.2,
+                "on_time": 0.3,
+                "rating": 0.4,
+                "disputes": 0.1,
+            },
+        }
+
+========== nexus_ledger/receipt_types.py ==========
+"""Typed task receipt vocabulary for Nexus Ledger."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+from uuid import uuid4
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class ReceiptTypeBase:
+    task_id: str
+
+    def validate(self) -> None:
+        if not str(self.task_id).strip():
+            raise ValueError("task_id is required")
+
+    def as_data(self) -> Dict[str, Any]:
+        self.validate()
+        return {"task_id": self.task_id}
+
+
+@dataclass
+class TaskRequest(ReceiptTypeBase):
+    description: str
+    budget: float
+    deadline: str = field(default_factory=_utc_now)
+
+    def validate(self) -> None:
+        super().validate()
+        if not str(self.description).strip():
+            raise ValueError("description is required")
+        if float(self.budget) < 0:
+            raise ValueError("budget must be non-negative")
+        if not str(self.deadline).strip():
+            raise ValueError("deadline is required")
+
+    def as_data(self) -> Dict[str, Any]:
+        self.validate()
+        return {
+            "task_id": self.task_id,
+            "description": str(self.description),
+            "budget": float(self.budget),
+            "deadline": str(self.deadline),
+        }
+
+
+@dataclass
+class TaskAccepted(ReceiptTypeBase):
+    estimated_delivery: str
+
+    def validate(self) -> None:
+        super().validate()
+        if not str(self.estimated_delivery).strip():
+            raise ValueError("estimated_delivery is required")
+
+    def as_data(self) -> Dict[str, Any]:
+        self.validate()
+        return {
+            "task_id": self.task_id,
+            "estimated_delivery": str(self.estimated_delivery),
+        }
+
+
+@dataclass
+class TaskDelivered(ReceiptTypeBase):
+    artifact_hash: str
+    artifact_url: Optional[str] = None
+
+    def validate(self) -> None:
+        super().validate()
+        if not str(self.artifact_hash).strip():
+            raise ValueError("artifact_hash is required")
+
+    def as_data(self) -> Dict[str, Any]:
+        self.validate()
+        payload: Dict[str, Any] = {
+            "task_id": self.task_id,
+            "artifact_hash": str(self.artifact_hash),
+        }
+        if self.artifact_url:
+            payload["artifact_url"] = str(self.artifact_url)
+        return payload
+
+
+@dataclass
+class TaskConfirmed(ReceiptTypeBase):
+    rating: int
+    feedback: str
+
+    def validate(self) -> None:
+        super().validate()
+        rating = int(self.rating)
+        if rating < 1 or rating > 5:
+            raise ValueError("rating must be between 1 and 5")
+        if not str(self.feedback).strip():
+            raise ValueError("feedback is required")
+
+    def as_data(self) -> Dict[str, Any]:
+        self.validate()
+        return {
+            "task_id": self.task_id,
+            "rating": int(self.rating),
+            "feedback": str(self.feedback),
+        }
+
+
+@dataclass
+class TaskDisputed(ReceiptTypeBase):
+    reason: str
+
+    def validate(self) -> None:
+        super().validate()
+        if not str(self.reason).strip():
+            raise ValueError("reason is required")
+
+    def as_data(self) -> Dict[str, Any]:
+        self.validate()
+        return {
+            "task_id": self.task_id,
+            "reason": str(self.reason),
+        }
+
+
+def new_task_id() -> str:
+    return f"task-{uuid4().hex[:12]}"
+
+========== nexus_ledger/agent.py ==========
+"""Single-file public API for Nexus Ledger."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from .crypto import decrypt_payload, encrypt_payload
+from .erc8004 import (
+    BASE_MAINNET_RPC,
+    HACKATHON_AGENT_ID,
+    HACKATHON_WALLET,
+    REGISTRATION_TX_HASH,
+    ERC8004,
+)
+from .ledger import Ledger, receipt_proof_hash, receipt_signing_payload
+from .proof_anchor import anchor as anchor_proof
+from .proof_anchor import verify as verify_proof
+from .protocol import generate_keypair, sign, verify
+from .receipt_types import TaskAccepted, TaskConfirmed, TaskDelivered, TaskDisputed, TaskRequest, new_task_id
+from .relay_manager import DEFAULT_RELAYS, RelayManager
+from .transport import (
+    HTTPTransport,
+    pack_receipt,
+    public_key_to_did,
+    receive_and_countersign,
+    resolve_did,
+    send_receipt as transport_send_receipt,
+    unpack_receipt,
+)
+from .trust import TrustScorer
+from .ws_transport import LiveConnection
+
+
+DEFAULT_RELAY_URL = DEFAULT_RELAYS[0]
+
+
+def verify_receipt_dict(receipt: Dict[str, Any]) -> bool:
+    required_fields = [
+        "timestamp",
+        "event_type",
+        "data",
+        "parent_receipt_hash",
+        "agent_a_pubkey",
+        "agent_b_pubkey",
+        "agent_a_signature",
+        "agent_b_signature",
+    ]
+    if not isinstance(receipt, dict):
+        return False
+    if any(field not in receipt for field in required_fields):
+        return False
+
+    payload = receipt_signing_payload(receipt)
+    agent_a_ok = verify(str(receipt["agent_a_pubkey"]), payload, str(receipt["agent_a_signature"]))
+    agent_b_ok = verify(str(receipt["agent_b_pubkey"]), payload, str(receipt["agent_b_signature"]))
+    return agent_a_ok and agent_b_ok
+
+
+class Agent:
+    def __init__(
+        self,
+        name: str,
+        *,
+        keys_dir: str = "keys",
+        db_path: str = "nexus.db",
+        relay: Optional[str] = None,
+        relays: Optional[List[str]] = None,
+        erc8004_agent_id: int = HACKATHON_AGENT_ID,
+        erc8004_wallet: str = HACKATHON_WALLET,
+        erc8004_registration_tx: str = REGISTRATION_TX_HASH,
+        erc8004_rpc_url: str = BASE_MAINNET_RPC,
+    ) -> None:
+        clean_name = str(name).strip()
+        if not clean_name:
+            raise ValueError("Agent name is required")
+
+        self.name = clean_name
+        self.keys_dir = Path(keys_dir)
+        self.keys_dir.mkdir(parents=True, exist_ok=True)
+
+        self.private_key, self.public_key = self._load_or_create_keys()
+        self._ledger = Ledger(path=db_path)
+        self._listener_server = None
+
+        configured_relays = self._normalize_relays(relay=relay, relays=relays)
+        self.relays = configured_relays
+        self.relay = configured_relays[0]
+        self._relay_manager = RelayManager(configured_relays, timeout_seconds=0.75)
+
+        self.erc8004_agent_id = int(erc8004_agent_id)
+        self.erc8004_wallet = str(erc8004_wallet).strip() or HACKATHON_WALLET
+        self._erc8004 = ERC8004(
+            rpc_url=erc8004_rpc_url,
+            registration_tx_hash=erc8004_registration_tx,
+            default_agent_id=self.erc8004_agent_id,
+            default_wallet=self.erc8004_wallet,
+        )
+        self._relay_available = False
+        self._receipt_callbacks: List[Callable[[Dict[str, Any]], None]] = []
+        self._live_connection: Optional[LiveConnection] = None
+        self._trust = TrustScorer()
+        self._register_on_relay_safely()
+
+    @staticmethod
+    def _normalize_relays(*, relay: Optional[str], relays: Optional[List[str]]) -> List[str]:
+        if relays:
+            cleaned = [str(item).strip() for item in relays if str(item).strip()]
+            if cleaned:
+                return cleaned
+        if relay:
+            primary = str(relay).strip()
+            if primary:
+                fallback = DEFAULT_RELAYS[1]
+                return [primary, fallback] if primary != fallback else [primary]
+        return list(DEFAULT_RELAYS)
+
+    def _key_file_path(self) -> Path:
+        safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in self.name).strip("_")
+        filename = f"{safe or 'agent'}.json"
+        return self.keys_dir / filename
+
+    def _load_or_create_keys(self) -> tuple[str, str]:
+        key_path = self._key_file_path()
+        if key_path.exists():
+            payload = json.loads(key_path.read_text(encoding="utf-8"))
+            return str(payload["private_key"]), str(payload["public_key"])
+
+        private_key, public_key = generate_keypair()
+        key_path.write_text(
+            json.dumps(
+                {
+                    "name": self.name,
+                    "private_key": private_key,
+                    "public_key": public_key,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return private_key, public_key
+
+    def log(self, event_type: str, data: Dict[str, Any], counterparty: Optional["Agent"] = None) -> Dict[str, Any]:
+        counterparty_key = counterparty.public_key if counterparty else None
+        return self._ledger.log(
+            self.private_key,
+            event_type,
+            data,
+            counterparty_key=counterparty_key,
+        )
+
+    def anchor(self, data_dict: Dict[str, Any], keypair_path: str = "~/.config/solana/id.json") -> Dict[str, str]:
+        return anchor_proof(data_dict, keypair_path=keypair_path)
+
+    def verify(self, data_dict: Dict[str, Any], expected_hash: str) -> bool:
+        return verify_proof(data_dict, expected_hash)
+
+    def erc8004_identity(self) -> Dict[str, Any]:
+        return self._erc8004.get_agent_identity(self.erc8004_agent_id)
+
+    def rate_counterparty(self, receipt: Dict[str, Any], rating: int, comment: str) -> Dict[str, Any]:
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt must be a dict")
+        receipt_hash = receipt_proof_hash(receipt)
+        return self._erc8004.post_reputation(self.erc8004_agent_id, receipt_hash, rating, comment)
+
+    def get_on_chain_reputation(self) -> Dict[str, Any]:
+        return self._erc8004.get_reputation(self.erc8004_agent_id)
+
+    def history(self) -> list[Dict[str, Any]]:
+        return self._ledger.by_agent(self.public_key)
+
+    def all_activity(self) -> list[Dict[str, Any]]:
+        return self._ledger.all()
+
+    @property
+    def did(self) -> str:
+        return public_key_to_did(self.public_key)
+
+    @property
+    def relay_online(self) -> bool:
+        return self._relay_available
+
+    def _register_on_relay_safely(self) -> None:
+        attempts = self._relay_request_all(
+            "/register",
+            method="POST",
+            payload={"did": self.did, "name": self.name, "pubkey": self.public_key},
+        )
+        if attempts:
+            self._relay_available = True
+            return
+
+        checks = self._relay_request_all("/health")
+        self._relay_available = bool(checks)
+
+    def _relay_request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        try:
+            response = self._relay_manager.request(path, method=method, params=params, payload=payload)
+            self.relay = self._relay_manager.active_relay
+            self._relay_available = True
+            return response
+        except Exception as exc:
+            self._relay_available = False
+            raise RuntimeError(f"Relay request failed: {exc}") from exc
+
+    def _relay_request_all(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> List[Any]:
+        if "_relay_request" in self.__dict__:
+            try:
+                return [self._relay_request(path, method=method, params=params, payload=payload)]
+            except Exception:
+                return []
+
+        attempts = self._relay_manager.request_all(path, method=method, params=params, payload=payload)
+        successes = [attempt.response for attempt in attempts if attempt.ok]
+        if successes:
+            self.relay = self._relay_manager.active_relay
+            self._relay_available = True
+        elif not attempts:
+            self._relay_available = False
+        return successes
+
+    def _parse_discovery_response(self, payload: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(payload, dict) and "agents" in payload:
+            payload = payload["agents"]
+        if isinstance(payload, list):
+            if not payload:
+                return None
+            payload = payload[0]
+        if isinstance(payload, dict):
+            candidate = payload.get("agent")
+            if isinstance(candidate, dict):
+                payload = candidate
+            did = str(payload.get("did", "")).strip()
+            pubkey = str(payload.get("pubkey", payload.get("public_key", ""))).strip()
+            name = str(payload.get("name", "")).strip()
+            if did:
+                if not pubkey:
+                    pubkey = resolve_did(did).hex()
+                normalized = dict(payload)
+                normalized["did"] = did
+                normalized["name"] = name
+                normalized["pubkey"] = pubkey
+                return normalized
+        return None
+
+    def _extract_envelopes(self, payload: Any) -> list[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            if isinstance(payload.get("messages"), list):
+                items: list[Any] = payload["messages"]
+            elif isinstance(payload.get("envelopes"), list):
+                items = payload["envelopes"]
+            elif "envelope" in payload:
+                items = [payload["envelope"]]
+            elif all(key in payload for key in ("sender_did", "signature", "payload")):
+                items = [payload]
+            else:
+                items = []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+
+        envelopes: list[Dict[str, Any]] = []
+        for item in items:
+            candidate: Any = item.get("envelope") if isinstance(item, dict) and "envelope" in item else item
+            if isinstance(candidate, str):
+                try:
+                    candidate = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(candidate, dict) and all(k in candidate for k in ("sender_did", "signature", "payload")):
+                envelopes.append(candidate)
+        return envelopes
+
+    def find(self, name: str) -> Optional[Dict[str, Any]]:
+        query = str(name).strip()
+        if not query:
+            raise ValueError("Agent name is required")
+        if not self._relay_available:
+            return None
+        try:
+            payload = self._relay_request("/discover", params={"name": query})
+        except RuntimeError:
+            return None
+        return self._parse_discovery_response(payload)
+
+    def online_agents(self) -> list[Dict[str, Any]]:
+        if not self._relay_available:
+            return []
+        try:
+            payload = self._relay_request("/discover")
+        except RuntimeError:
+            return []
+
+        if isinstance(payload, dict) and isinstance(payload.get("agents"), list):
+            raw_agents = payload["agents"]
+        elif isinstance(payload, list):
+            raw_agents = payload
+        else:
+            raw_agents = []
+
+        result: list[Dict[str, Any]] = []
+        for item in raw_agents:
+            parsed = self._parse_discovery_response(item)
+            if parsed is not None:
+                result.append(parsed)
+        return result
+
+    def _latest_task_receipt_hash(self, task_id: str) -> str:
+        chain = self.get_task_chain(task_id)
+        if not chain:
+            return ""
+        return str(chain[-1].get("proof_hash", ""))
+
+    def _resolve_task_counterparty_pubkey(self, task_id: str) -> Optional[str]:
+        chain = self.get_task_chain(task_id)
+        if not chain:
+            return None
+        latest = chain[-1]
+        a = str(latest.get("agent_a_pubkey", ""))
+        b = str(latest.get("agent_b_pubkey", ""))
+        if a == self.public_key:
+            return b
+        if b == self.public_key:
+            return a
+        return b or a or None
+
+    def _wrap_for_transport(self, receipt: Dict[str, Any], recipient_pubkey: str, encrypted: bool) -> Dict[str, Any]:
+        if not encrypted:
+            return receipt
+        return encrypt_payload(receipt, self.private_key, recipient_pubkey)
+
+    def _unwrap_transport_payload(self, payload: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+        if payload.get("encrypted") is True:
+            decrypted = decrypt_payload(payload, self.private_key)
+            return decrypted, True
+        return payload, False
+
+    def send(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        *,
+        to: str,
+        encrypted: bool = False,
+        parent_receipt_hash: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ValueError("data must be a dict")
+        if not self._relay_available:
+            raise RuntimeError("Relay is unavailable; agent is running in local-only mode")
+
+        target = str(to).strip()
+        if not target:
+            raise ValueError("Recipient name or DID is required")
+
+        if target.startswith("did:key:"):
+            recipient_did = target
+            recipient_pubkey = resolve_did(target).hex()
+        else:
+            found = self.find(target)
+            if found is None:
+                raise ValueError(f"Agent '{target}' not found on relay")
+            recipient_did = str(found["did"])
+            recipient_pubkey = str(found["pubkey"])
+
+        parent_hash = str(parent_receipt_hash or "")
+        if not parent_hash and str(data.get("task_id", "")).strip():
+            parent_hash = self._latest_task_receipt_hash(str(data["task_id"]))
+
+        receipt = self.create_receipt(event_type, data, recipient_pubkey, parent_receipt_hash=parent_hash)
+        payload = self._wrap_for_transport(receipt, recipient_pubkey, encrypted=encrypted)
+        envelope = json.loads(pack_receipt(payload, self.private_key))
+        self._relay_request("/send", method="POST", payload={"to": recipient_did, "envelope": envelope})
+        return receipt
+
+    def _process_envelope(self, envelope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        envelope_json = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+        sender_did = str(envelope.get("sender_did", "")).strip()
+
+        try:
+            payload = unpack_receipt(envelope_json, expected_sender_did=sender_did or None)
+        except ValueError:
+            return []
+
+        try:
+            receipt, was_encrypted = self._unwrap_transport_payload(payload)
+        except Exception:
+            return []
+
+        processed: List[Dict[str, Any]] = []
+
+        if "agent_b_signature" in receipt:
+            if self.verify_receipt(receipt):
+                stored = self.store_receipt(receipt)
+                stored_receipt = dict(receipt)
+                stored_receipt["proof_hash"] = stored["proof_hash"]
+                processed.append(stored_receipt)
+            return processed
+
+        if str(receipt.get("agent_b_pubkey", "")) != self.public_key:
+            return processed
+
+        try:
+            countersigned = self.countersign_receipt(receipt)
+        except ValueError:
+            return processed
+
+        stored = self.store_receipt(countersigned)
+        countersigned["proof_hash"] = stored["proof_hash"]
+        processed.append(countersigned)
+
+        if sender_did:
+            response_payload: Dict[str, Any] = countersigned
+            if was_encrypted:
+                response_payload = self._wrap_for_transport(countersigned, str(receipt["agent_a_pubkey"]), encrypted=True)
+            response_envelope = json.loads(pack_receipt(response_payload, self.private_key))
+            try:
+                self._relay_request(
+                    "/send",
+                    method="POST",
+                    payload={"to": sender_did, "envelope": response_envelope},
+                )
+            except RuntimeError:
+                pass
+
+        return processed
+
+    def _dispatch_receipt(self, receipt: Dict[str, Any]) -> None:
+        for callback in list(self._receipt_callbacks):
+            try:
+                callback(receipt)
+            except Exception:
+                continue
+
+    def _poll_once(self) -> None:
+        self.check_inbox()
+
+    def _on_ws_message(self, payload: Dict[str, Any]) -> None:
+        envelopes = self._extract_envelopes(payload)
+        for envelope in envelopes:
+            for receipt in self._process_envelope(envelope):
+                self._dispatch_receipt(receipt)
+
+    def on_receipt(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        self._receipt_callbacks.append(callback)
+        if self._live_connection is None:
+            self._live_connection = LiveConnection(
+                did=self.did,
+                relay_manager=self._relay_manager,
+                on_ws_message=self._on_ws_message,
+                poll_once=self._poll_once,
+                poll_interval_seconds=1.0,
+            )
+            self._live_connection.start()
+
+    def check_inbox(self) -> list[Dict[str, Any]]:
+        if not self._relay_available:
+            return []
+
+        payloads = self._relay_request_all("/receive", params={"did": self.did})
+        if not payloads:
+            try:
+                payloads = [self._relay_request("/receive", params={"did": self.did})]
+            except RuntimeError:
+                return []
+
+        envelope_map: Dict[str, Dict[str, Any]] = {}
+        for payload in payloads:
+            for envelope in self._extract_envelopes(payload):
+                key = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+                envelope_map[key] = envelope
+
+        processed: list[Dict[str, Any]] = []
+        seen_hashes: set[str] = set()
+        for envelope in envelope_map.values():
+            for receipt in self._process_envelope(envelope):
+                proof_hash = str(receipt.get("proof_hash", ""))
+                if proof_hash and proof_hash in seen_hashes:
+                    continue
+                if proof_hash:
+                    seen_hashes.add(proof_hash)
+                processed.append(receipt)
+                self._dispatch_receipt(receipt)
+
+        return processed
+
+    def create_receipt(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        counterparty_pubkey: str,
+        *,
+        parent_receipt_hash: str = "",
+    ) -> Dict[str, Any]:
+        if not str(counterparty_pubkey).strip():
+            raise ValueError("counterparty_pubkey is required")
+        if not isinstance(data, dict):
+            raise ValueError("data must be a dict")
+
+        receipt: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": str(event_type),
+            "data": data,
+            "parent_receipt_hash": str(parent_receipt_hash or ""),
+            "agent_a_pubkey": self.public_key,
+            "agent_b_pubkey": str(counterparty_pubkey),
+        }
+        receipt["agent_a_signature"] = sign(self.private_key, receipt_signing_payload(receipt))
+        return receipt
+
+    def countersign_receipt(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt must be a dict")
+
+        required_fields = [
+            "timestamp",
+            "event_type",
+            "data",
+            "parent_receipt_hash",
+            "agent_a_pubkey",
+            "agent_b_pubkey",
+            "agent_a_signature",
+        ]
+        missing = [field for field in required_fields if field not in receipt]
+        if missing:
+            raise ValueError(f"Receipt missing required fields: {', '.join(missing)}")
+
+        if str(receipt["agent_b_pubkey"]) != self.public_key:
+            raise ValueError("Receipt is not addressed to this agent")
+
+        payload = receipt_signing_payload(receipt)
+        if not verify(str(receipt["agent_a_pubkey"]), payload, str(receipt["agent_a_signature"])):
+            raise ValueError("Invalid agent A signature")
+
+        countersigned = dict(receipt)
+        countersigned["agent_b_signature"] = sign(self.private_key, payload)
+        return countersigned
+
+    def verify_receipt(self, receipt: Dict[str, Any]) -> bool:
+        return verify_receipt_dict(receipt)
+
+    def store_receipt(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.verify_receipt(receipt):
+            raise ValueError("Cannot store invalid receipt")
+        receipt_to_store = dict(receipt)
+        receipt_to_store.setdefault("parent_receipt_hash", "")
+        receipt_to_store["proof_hash"] = receipt_proof_hash(receipt_to_store)
+        return self._ledger.store_receipt(receipt_to_store)
+
+    def export_receipt(self, receipt: Dict[str, Any]) -> str:
+        return json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+
+    def import_receipt(self, json_string: str) -> Dict[str, Any]:
+        receipt = json.loads(json_string)
+        if not isinstance(receipt, dict):
+            raise ValueError("Receipt JSON must decode to an object")
+        return receipt
+
+    def export_did(self) -> str:
+        return self.did
+
+    def send_receipt(
+        self,
+        to_agent_or_did: Any,
+        event_type: str,
+        data: Dict[str, Any],
+        transport: str = "http",
+        endpoint: Optional[str] = None,
+    ) -> str:
+        recipient_did: Optional[str] = None
+        recipient_pubkey: Optional[str] = None
+
+        if isinstance(to_agent_or_did, Agent):
+            recipient_did = to_agent_or_did.did
+            recipient_pubkey = to_agent_or_did.public_key
+        else:
+            target = str(to_agent_or_did).strip()
+            if not target:
+                raise ValueError("Recipient DID is required")
+            if target.startswith("did:key:"):
+                recipient_did = target
+                recipient_pubkey = resolve_did(target).hex()
+            else:
+                recipient_pubkey = target
+                recipient_did = public_key_to_did(target)
+
+        receipt = self.create_receipt(event_type, data, recipient_pubkey)
+        response = transport_send_receipt(
+            self,
+            recipient_did,
+            receipt,
+            transport=transport,
+            endpoint=endpoint,
+        )
+        return response
+
+    def receive_receipt(self, envelope_json: str) -> Dict[str, Any]:
+        receipt = unpack_receipt(envelope_json)
+        if "agent_b_signature" in receipt:
+            if not self.verify_receipt(receipt):
+                raise ValueError("Received countersigned receipt is invalid")
+            self.store_receipt(receipt)
+            return receipt
+        return receive_and_countersign(self, envelope_json)
+
+    def start_listener(self, port: int = 8765):
+        def _callback(inbound_envelope: str) -> str:
+            countersigned = self.receive_receipt(inbound_envelope)
+            return pack_receipt(countersigned, self.private_key)
+
+        if self._listener_server is not None:
+            self._listener_server.shutdown()
+            self._listener_server.server_close()
+
+        self._listener_server = HTTPTransport().start_listener(
+            port,
+            _callback,
+            did_provider=self.export_did,
+        )
+        return self._listener_server
+
+    def get_task_chain(self, task_id: str) -> List[Dict[str, Any]]:
+        rows = self._ledger.get_task_chain(task_id)
+        if not rows:
+            return []
+
+        parsed: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                data = json.loads(str(item.get("data_json", "{}")))
+            except json.JSONDecodeError:
+                data = {}
+            item["data"] = data
+            parsed.append(item)
+
+        by_proof = {str(item.get("proof_hash", "")): item for item in parsed}
+        roots = [
+            item
+            for item in parsed
+            if not str(item.get("parent_receipt_hash", ""))
+            or str(item.get("parent_receipt_hash", "")) not in by_proof
+        ]
+
+        ordered: List[Dict[str, Any]] = []
+        current = roots[0] if roots else parsed[0]
+        remaining = {id(item): item for item in parsed}
+        while current and id(current) in remaining:
+            ordered.append(current)
+            remaining.pop(id(current), None)
+            next_item = None
+            for candidate in list(remaining.values()):
+                if str(candidate.get("parent_receipt_hash", "")) == str(current.get("proof_hash", "")):
+                    next_item = candidate
+                    break
+            current = next_item
+
+        ordered.extend(remaining.values())
+        return ordered
+
+    def request_task(
+        self,
+        to: str,
+        *,
+        description: str,
+        budget: float,
+        deadline: Optional[str] = None,
+        task_id: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        tid = str(task_id or new_task_id())
+        typed = TaskRequest(task_id=tid, description=description, budget=budget, deadline=deadline or datetime.now(timezone.utc).isoformat())
+        return self.send("TaskRequest", typed.as_data(), to=to, encrypted=encrypted)
+
+    def accept_task(self, to: str, *, task_id: str, estimated_delivery: str, encrypted: bool = False) -> Dict[str, Any]:
+        typed = TaskAccepted(task_id=task_id, estimated_delivery=estimated_delivery)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskAccepted", typed.as_data(), to=to, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def deliver_task(
+        self,
+        task_id: str,
+        *,
+        artifact_hash: str,
+        artifact_url: Optional[str] = None,
+        to: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        typed = TaskDelivered(task_id=task_id, artifact_hash=artifact_hash, artifact_url=artifact_url)
+        counterparty = to
+        if not counterparty:
+            pubkey = self._resolve_task_counterparty_pubkey(task_id)
+            if not pubkey:
+                raise ValueError("Could not infer task counterparty; provide 'to'")
+            counterparty = public_key_to_did(pubkey)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskDelivered", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def confirm_task(
+        self,
+        task_id: str,
+        *,
+        rating: int,
+        feedback: str,
+        to: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        typed = TaskConfirmed(task_id=task_id, rating=rating, feedback=feedback)
+        counterparty = to
+        if not counterparty:
+            pubkey = self._resolve_task_counterparty_pubkey(task_id)
+            if not pubkey:
+                raise ValueError("Could not infer task counterparty; provide 'to'")
+            counterparty = public_key_to_did(pubkey)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskConfirmed", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def dispute_task(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+        to: Optional[str] = None,
+        encrypted: bool = False,
+    ) -> Dict[str, Any]:
+        typed = TaskDisputed(task_id=task_id, reason=reason)
+        counterparty = to
+        if not counterparty:
+            pubkey = self._resolve_task_counterparty_pubkey(task_id)
+            if not pubkey:
+                raise ValueError("Could not infer task counterparty; provide 'to'")
+            counterparty = public_key_to_did(pubkey)
+        parent = self._latest_task_receipt_hash(task_id)
+        return self.send("TaskDisputed", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+
+    def trust_score(self) -> float:
+        return float(self.get_trust_report(self.public_key)["score"])
+
+    def get_trust_report(self, agent_pubkey: str) -> Dict[str, Any]:
+        report = self._trust.build_report(agent_pubkey, self._ledger.get_receipts())
+        return report
+
+========== nexus_ledger/relay_manager.py ==========
+"""Relay manager with failover across multiple relay endpoints."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+from urllib import parse, request
+from urllib.error import HTTPError, URLError
+
+
+DEFAULT_PRIMARY_RELAY = "http://104.236.251.94:8765"
+DEFAULT_FALLBACK_RELAY = "http://localhost:8765"
+DEFAULT_RELAYS = [DEFAULT_PRIMARY_RELAY, DEFAULT_FALLBACK_RELAY]
+
+
+@dataclass
+class RelayAttempt:
+    relay: str
+    ok: bool
+    response: Any = None
+    error: Optional[Exception] = None
+
+
+class RelayManager:
+    """HTTP relay requester with transparent failover."""
+
+    def __init__(self, relays: List[str], timeout_seconds: float = 0.75) -> None:
+        cleaned = [str(relay).strip().rstrip("/") for relay in relays if str(relay).strip()]
+        if not cleaned:
+            cleaned = list(DEFAULT_RELAYS)
+        self.relays = cleaned
+        self.timeout_seconds = float(timeout_seconds)
+        self._active_index = 0
+
+    @property
+    def active_relay(self) -> str:
+        return self.relays[self._active_index]
+
+    def request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Try current relay first, then fail over through all configured relays."""
+        ordered = self._ordered_relays()
+        last_error: Optional[Exception] = None
+
+        for relay in ordered:
+            try:
+                response = self._request_to_relay(relay, path, method=method, params=params, payload=payload)
+                self._active_index = self.relays.index(relay)
+                return response
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        raise RuntimeError(f"All relays failed for {path}: {last_error}")
+
+    def request_all(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> List[RelayAttempt]:
+        """Issue the same request to every relay and collect successes/failures."""
+        attempts: List[RelayAttempt] = []
+        for relay in self.relays:
+            try:
+                response = self._request_to_relay(relay, path, method=method, params=params, payload=payload)
+                attempts.append(RelayAttempt(relay=relay, ok=True, response=response))
+            except Exception as exc:
+                attempts.append(RelayAttempt(relay=relay, ok=False, error=exc))
+        if attempts:
+            for attempt in attempts:
+                if attempt.ok:
+                    self._active_index = self.relays.index(attempt.relay)
+                    break
+        return attempts
+
+    def _ordered_relays(self) -> List[str]:
+        active = self.active_relay
+        others = [relay for relay in self.relays if relay != active]
+        return [active] + others
+
+    def _request_to_relay(
+        self,
+        relay: str,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        rel = path if path.startswith("/") else f"/{path}"
+        query = f"?{parse.urlencode(params)}" if params else ""
+        url = f"{relay}{rel}{query}"
+
+        headers = {"Accept": "application/json"}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, sort_keys=True).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        req = request.Request(url, data=body, headers=headers, method=method.upper())
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                text = response.read().decode("utf-8").strip()
+        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+            raise RuntimeError(f"Relay request failed for {relay}: {exc}") from exc
+
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+========== nexus_ledger/transport.py ==========
+"""DIDComm-inspired transport for cross-machine receipt exchange."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Thread
+from typing import Any, Callable, Dict, Optional
+from urllib import request
+from urllib.error import HTTPError, URLError
+
+from nacl.signing import SigningKey
+
+from .protocol import sign, verify
+
+
+JsonDict = Dict[str, Any]
+
+_DID_PREFIX = "did:key:z"
+_MULTICODEC_ED25519_PREFIX = b"\xed\x01"
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BASE58_INDEX = {ch: idx for idx, ch in enumerate(_BASE58_ALPHABET)}
+
+
+class TransportError(RuntimeError):
+    """Raised when transport operations fail."""
+
+
+def _canonical_json(data_dict: JsonDict) -> bytes:
+    return json.dumps(data_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _b58_encode(raw: bytes) -> str:
+    number = int.from_bytes(raw, "big")
+    encoded = ""
+    while number > 0:
+        number, remainder = divmod(number, 58)
+        encoded = _BASE58_ALPHABET[remainder] + encoded
+
+    leading_zeroes = len(raw) - len(raw.lstrip(b"\x00"))
+    return ("1" * leading_zeroes) + (encoded or "1")
+
+
+def _b58_decode(encoded: str) -> bytes:
+    number = 0
+    for char in encoded:
+        if char not in _BASE58_INDEX:
+            raise ValueError("Invalid base58btc character")
+        number = number * 58 + _BASE58_INDEX[char]
+
+    raw = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    leading_ones = len(encoded) - len(encoded.lstrip("1"))
+    return (b"\x00" * leading_ones) + raw
+
+
+def public_key_to_did(public_key_hex: str) -> str:
+    public_key = bytes.fromhex(str(public_key_hex))
+    if len(public_key) != 32:
+        raise ValueError("Ed25519 public key must be 32 bytes")
+    return _DID_PREFIX + _b58_encode(_MULTICODEC_ED25519_PREFIX + public_key)
+
+
+def private_key_to_did(private_key_hex: str) -> str:
+    signing_key = SigningKey(bytes.fromhex(str(private_key_hex)))
+    return public_key_to_did(signing_key.verify_key.encode().hex())
+
+
+def resolve_did(did_string: str) -> bytes:
+    did = str(did_string)
+    if not did.startswith(_DID_PREFIX):
+        raise ValueError("Unsupported DID format")
+
+    decoded = _b58_decode(did[len(_DID_PREFIX) :])
+    if not decoded.startswith(_MULTICODEC_ED25519_PREFIX):
+        raise ValueError("Unsupported DID multicodec")
+
+    public_key = decoded[len(_MULTICODEC_ED25519_PREFIX) :]
+    if len(public_key) != 32:
+        raise ValueError("Invalid Ed25519 public key length in DID")
+    return public_key
+
+
+def pack_receipt(receipt_dict: JsonDict, sender_private_key: str) -> str:
+    sender_did = private_key_to_did(sender_private_key)
+    signed_payload = {
+        "sender_did": sender_did,
+        "payload": receipt_dict,
+    }
+    envelope = {
+        "type": "nexus.didcomm.receipt.v1",
+        "sender_did": sender_did,
+        "signature": sign(sender_private_key, signed_payload),
+        "payload": receipt_dict,
+    }
+    return json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+
+
+def unpack_receipt(envelope_json: str, expected_sender_did: Optional[str] = None) -> JsonDict:
+    envelope = json.loads(envelope_json)
+    if not isinstance(envelope, dict):
+        raise ValueError("Envelope JSON must decode to an object")
+
+    required = ["sender_did", "signature", "payload"]
+    missing = [field for field in required if field not in envelope]
+    if missing:
+        raise ValueError(f"Envelope missing required fields: {', '.join(missing)}")
+
+    sender_did = str(envelope["sender_did"])
+    if expected_sender_did and sender_did != str(expected_sender_did):
+        raise ValueError("Unexpected sender DID")
+
+    payload = envelope["payload"]
+    if not isinstance(payload, dict):
+        raise ValueError("Envelope payload must be an object")
+
+    signed_payload = {
+        "sender_did": sender_did,
+        "payload": payload,
+    }
+    sender_pubkey_hex = resolve_did(sender_did).hex()
+    if not verify(sender_pubkey_hex, signed_payload, str(envelope["signature"])):
+        raise ValueError("Invalid envelope signature")
+
+    return payload
+
+
+class HTTPTransport:
+    def send(self, url: str, envelope: str) -> str:
+        target_url = str(url).strip()
+        if not target_url:
+            raise ValueError("HTTP endpoint URL is required")
+
+        body = envelope.encode("utf-8")
+        req = request.Request(
+            target_url,
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=10) as response:
+                return response.read().decode("utf-8")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise TransportError(f"HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise TransportError(f"HTTP transport failed: {exc.reason}") from exc
+
+    def start_listener(
+        self,
+        port: int,
+        callback: Callable[[str], str],
+        did_provider: Optional[Callable[[], str]] = None,
+    ) -> ThreadingHTTPServer:
+        callback_fn = callback
+        did_provider_fn = did_provider
+
+        class ListenerHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/did" and did_provider_fn is not None:
+                    did_body = json.dumps({"did": did_provider_fn()}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(did_body)))
+                    self.end_headers()
+                    self.wfile.write(did_body)
+                    return
+
+                self.send_response(404)
+                self.end_headers()
+
+            def do_POST(self) -> None:  # noqa: N802
+                content_length = int(self.headers.get("Content-Length", "0"))
+                payload = self.rfile.read(content_length).decode("utf-8")
+                try:
+                    response_body = callback_fn(payload)
+                    if not isinstance(response_body, str):
+                        response_body = json.dumps(response_body)
+                    body = response_body.encode("utf-8")
+                    self.send_response(200)
+                except Exception as exc:  # pragma: no cover - defensive server path
+                    body = json.dumps({"error": str(exc)}).encode("utf-8")
+                    self.send_response(400)
+
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        server = ThreadingHTTPServer(("0.0.0.0", int(port)), ListenerHandler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server
+
+
+class FileTransport:
+    def send(self, filepath: str, envelope: str) -> str:
+        path = Path(filepath)
+        if path.is_dir() or str(filepath).endswith("/"):
+            path.mkdir(parents=True, exist_ok=True)
+            filename = datetime.now(timezone.utc).strftime("envelope_%Y%m%dT%H%M%S%fZ.json")
+            output = path / filename
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            output = path
+
+        output.write_text(envelope, encoding="utf-8")
+        return str(output)
+
+    def receive(self, filepath: str) -> str:
+        path = Path(filepath)
+        if path.is_dir():
+            envelopes = sorted(path.glob("*.json"), key=lambda p: p.stat().st_mtime)
+            if not envelopes:
+                raise FileNotFoundError("No envelope JSON files found")
+            path = envelopes[-1]
+        return path.read_text(encoding="utf-8")
+
+
+def send_receipt(
+    agent: Any,
+    to_did: str,
+    receipt: JsonDict,
+    transport: str = "http",
+    endpoint: Optional[str] = None,
+) -> str:
+    if not endpoint:
+        raise ValueError("endpoint is required")
+
+    recipient_public_key = resolve_did(to_did).hex()
+    if str(receipt.get("agent_b_pubkey")) != recipient_public_key:
+        raise ValueError("Receipt recipient does not match to_did")
+
+    envelope = pack_receipt(receipt, agent.private_key)
+    mode = str(transport).strip().lower()
+
+    if mode == "http":
+        return HTTPTransport().send(endpoint, envelope)
+    if mode == "file":
+        FileTransport().send(endpoint, envelope)
+        return envelope
+    raise ValueError(f"Unsupported transport: {transport}")
+
+
+def receive_and_countersign(agent: Any, envelope_json: str) -> JsonDict:
+    envelope = json.loads(envelope_json)
+    if not isinstance(envelope, dict):
+        raise ValueError("Envelope JSON must decode to an object")
+
+    sender_did = str(envelope.get("sender_did", ""))
+    receipt = unpack_receipt(envelope_json, expected_sender_did=sender_did)
+
+    expected_sender_pubkey = resolve_did(sender_did).hex()
+    if str(receipt.get("agent_a_pubkey")) != expected_sender_pubkey:
+        raise ValueError("Envelope sender DID does not match receipt signer")
+
+    countersigned = agent.countersign_receipt(receipt)
+    agent.store_receipt(countersigned)
+    return countersigned
+
+========== nexus_ledger/proof_anchor.py ==========
+"""Hashing and Solana proof anchoring."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from time import time_ns
+from typing import Any, Dict
+
+
+MAINNET_RPC_URL = "https://api.mainnet-beta.solana.com"
+MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+DEFAULT_KEYPAIR_PATH = "~/.config/solana/id.json"
+
+
+class AnchorError(RuntimeError):
+    pass
+
+
+def _canonical_json(data_dict: Dict[str, Any]) -> str:
+    return json.dumps(data_dict, sort_keys=True, separators=(",", ":"))
+
+
+def hash(data_dict: Dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(data_dict).encode("utf-8")).hexdigest()
+
+
+def _load_keypair(path: str) -> Any:
+    from solders.keypair import Keypair
+
+    keypair_path = Path(path).expanduser()
+    if not keypair_path.exists():
+        raise AnchorError(f"Solana keypair not found: {keypair_path}")
+
+    payload = json.loads(keypair_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise AnchorError(f"Invalid keypair file format: {keypair_path}")
+    return Keypair.from_bytes(bytes(payload))
+
+
+def _mock_anchor(proof_hash: str) -> Dict[str, str]:
+    tx_signature = f"mock_{time_ns()}"
+    return {
+        "hash": proof_hash,
+        "tx_signature": tx_signature,
+        "solscan_url": f"mock://{tx_signature}",
+    }
+
+
+def anchor(data_dict: Dict[str, Any], keypair_path: str = DEFAULT_KEYPAIR_PATH) -> Dict[str, str]:
+    proof_hash = hash(data_dict)
+    if os.getenv("NEXUS_LEDGER_ANCHOR_MODE", "mainnet").lower() == "mock":
+        return _mock_anchor(proof_hash)
+
+    try:
+        from solana.rpc.api import Client
+        from solders.instruction import Instruction
+        from solders.message import Message
+        from solders.pubkey import Pubkey
+        from solders.transaction import Transaction
+    except ImportError as exc:
+        raise AnchorError("Missing Solana dependencies. Install with: pip install 'nexus-ledger[solana]'") from exc
+
+    keypair = _load_keypair(keypair_path)
+    client = Client(MAINNET_RPC_URL)
+
+    memo_ix = Instruction(Pubkey.from_string(MEMO_PROGRAM_ID), proof_hash.encode("utf-8"), [])
+    latest = client.get_latest_blockhash()
+    blockhash = latest.value.blockhash
+
+    message = Message.new_with_blockhash([memo_ix], keypair.pubkey(), blockhash)
+    tx = Transaction.new_unsigned(message)
+    tx.sign([keypair], blockhash)
+
+    response = client.send_transaction(tx)
+    tx_signature = response.value if hasattr(response, "value") else response.get("result")
+    tx_signature_str = str(tx_signature)
+
+    return {
+        "hash": proof_hash,
+        "tx_signature": tx_signature_str,
+        "solscan_url": f"https://solscan.io/tx/{tx_signature_str}",
+    }
+
+
+def verify(data_dict: Dict[str, Any], expected_hash: str) -> bool:
+    return hash(data_dict) == str(expected_hash).strip().lower()
+
+========== nexus_ledger/erc8004.py ==========
+"""ERC-8004 Base mainnet integration utilities."""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+from urllib import request
+from urllib.error import URLError
+
+BASE_MAINNET_RPC = "https://mainnet.base.org"
+REGISTRATION_TX_HASH = "0xb80ee780354286184c5d68b94c68c95c35a9786068b325b78d7eea4a622e907f"
+HACKATHON_AGENT_ID = 35281
+HACKATHON_WALLET = "0xbbFb4Df7450FAB448e6bd2a138D0C241834848f9"
+
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55aeb36f6fd3"
+FUNCTION_SELECTORS = {
+    "name()": "06fdde03",
+    "symbol()": "95d89b41",
+    "ownerOf(uint256)": "6352211e",
+    "tokenURI(uint256)": "c87b56dd",
+    "reputationOf(uint256)": "d85d3d27",
+    "getReputation(uint256)": "b79011de",
+    "getAgentReputation(uint256)": "f9f2f419",
+    "scoreOf(uint256)": "f2d873a6",
+    "postReputation(uint256,bytes32,uint8,string)": "9d9f3522",
+    "postFeedback(uint256,bytes32,uint8,string)": "1f7a8011",
+    "postValidation(uint256,bytes32,bool)": "776ecf9d",
+    "recordValidation(uint256,bytes32,bool)": "cf177b6f",
+}
+
+
+class ERC8004Error(RuntimeError):
+    """Raised when ERC-8004 RPC operations fail."""
+
+
+@dataclass
+class RegistryAddresses:
+    identity_registry: Optional[str]
+    reputation_registry: Optional[str]
+    validation_registry: Optional[str]
+    registration_block: Optional[int]
+    registration_tx_hash: str
+
+
+class ERC8004:
+    def __init__(
+        self,
+        *,
+        rpc_url: str = BASE_MAINNET_RPC,
+        registration_tx_hash: str = REGISTRATION_TX_HASH,
+        default_agent_id: int = HACKATHON_AGENT_ID,
+        default_wallet: str = HACKATHON_WALLET,
+    ) -> None:
+        self.rpc_url = str(rpc_url).strip() or BASE_MAINNET_RPC
+        self.registration_tx_hash = str(registration_tx_hash).strip() or REGISTRATION_TX_HASH
+        self.default_agent_id = int(default_agent_id)
+        self.default_wallet = self._normalize_address(default_wallet)
+        self._registry_cache: Optional[RegistryAddresses] = None
+
+    def get_agent_identity(self, agent_id: int) -> Dict[str, Any]:
+        registries = self._discover_registry_addresses(agent_id=agent_id, wallet=self.default_wallet)
+        if not registries.identity_registry:
+            raise ERC8004Error("Could not infer ERC-8004 identity registry address from registration transaction")
+
+        contract = registries.identity_registry
+        owner = self._decode_address(self._eth_call(contract, self._encode_call("ownerOf(uint256)", [self._encode_uint256(agent_id)])))
+
+        token_uri = None
+        try:
+            token_uri = self._decode_string(
+                self._eth_call(contract, self._encode_call("tokenURI(uint256)", [self._encode_uint256(agent_id)]))
+            )
+        except ERC8004Error:
+            token_uri = None
+
+        name = None
+        symbol = None
+        try:
+            name = self._decode_string(self._eth_call(contract, self._encode_call("name()", [])))
+        except ERC8004Error:
+            name = None
+        try:
+            symbol = self._decode_string(self._eth_call(contract, self._encode_call("symbol()", [])))
+        except ERC8004Error:
+            symbol = None
+
+        metadata = self._fetch_metadata(token_uri) if token_uri else None
+
+        return {
+            "agent_id": int(agent_id),
+            "wallet": owner,
+            "identity_registry": contract,
+            "collection": {"name": name, "symbol": symbol},
+            "token_uri": token_uri,
+            "metadata": metadata,
+            "registration_tx_hash": registries.registration_tx_hash,
+            "registration_block": registries.registration_block,
+            "reputation_registry": registries.reputation_registry,
+            "validation_registry": registries.validation_registry,
+            "rpc_url": self.rpc_url,
+        }
+
+    def get_reputation(self, agent_id: int) -> Dict[str, Any]:
+        registries = self._discover_registry_addresses(agent_id=agent_id, wallet=self.default_wallet)
+        contract = registries.reputation_registry
+        if not contract:
+            return {
+                "agent_id": int(agent_id),
+                "reputation_registry": None,
+                "signals": [],
+                "summary": {},
+                "error": "Could not infer reputation registry address from registration transaction",
+            }
+
+        topic_agent = self._topic_uint256(agent_id)
+        from_block = self._to_hex(registries.registration_block or 0)
+
+        logs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for topics in ([None, topic_agent], [None, None, topic_agent]):
+            for entry in self._eth_get_logs(address=contract, topics=topics, from_block=from_block):
+                key = (str(entry.get("transactionHash", "")), str(entry.get("logIndex", "")))
+                logs[key] = entry
+
+        summary = self._read_reputation_summary(contract, agent_id)
+
+        return {
+            "agent_id": int(agent_id),
+            "reputation_registry": contract,
+            "signals": [self._normalize_log(log) for _, log in sorted(logs.items())],
+            "summary": summary,
+            "from_block": registries.registration_block,
+        }
+
+    def post_reputation(self, agent_id: int, receipt_hash: str, rating: int, comment: str) -> Dict[str, Any]:
+        registries = self._discover_registry_addresses(agent_id=agent_id, wallet=self.default_wallet)
+        contract = registries.reputation_registry
+        if not contract:
+            raise ERC8004Error("Reputation registry address unavailable")
+
+        private_key = os.getenv("NEXUS_LEDGER_PRIVATE_KEY", "").strip()
+        if not private_key:
+            raise ERC8004Error("Set NEXUS_LEDGER_PRIVATE_KEY to submit on-chain reputation")
+
+        if not (0 <= int(rating) <= 255):
+            raise ValueError("rating must be between 0 and 255")
+
+        receipt_bytes32 = self._normalize_bytes32(receipt_hash)
+        payloads = [
+            self._encode_call(
+                "postReputation(uint256,bytes32,uint8,string)",
+                [
+                    self._encode_uint256(agent_id),
+                    self._encode_bytes32(receipt_bytes32),
+                    self._encode_uint256(int(rating)),
+                    self._encode_string(comment),
+                ],
+            ),
+            self._encode_call(
+                "postFeedback(uint256,bytes32,uint8,string)",
+                [
+                    self._encode_uint256(agent_id),
+                    self._encode_bytes32(receipt_bytes32),
+                    self._encode_uint256(int(rating)),
+                    self._encode_string(comment),
+                ],
+            ),
+        ]
+
+        last_error: Optional[Exception] = None
+        for payload in payloads:
+            try:
+                tx_hash = self._send_transaction(contract, payload, private_key)
+                return {
+                    "tx_hash": tx_hash,
+                    "agent_id": int(agent_id),
+                    "reputation_registry": contract,
+                    "receipt_hash": receipt_bytes32,
+                    "rating": int(rating),
+                    "comment": str(comment),
+                }
+            except Exception as exc:  # pragma: no cover - network/write path
+                last_error = exc
+
+        raise ERC8004Error(f"Failed to submit reputation transaction: {last_error}")
+
+    def post_validation(self, agent_id: int, receipt_hash: str, validation_result: bool) -> Dict[str, Any]:
+        registries = self._discover_registry_addresses(agent_id=agent_id, wallet=self.default_wallet)
+        contract = registries.validation_registry
+        if not contract:
+            raise ERC8004Error("Validation registry address unavailable")
+
+        private_key = os.getenv("NEXUS_LEDGER_PRIVATE_KEY", "").strip()
+        if not private_key:
+            raise ERC8004Error("Set NEXUS_LEDGER_PRIVATE_KEY to submit on-chain validation")
+
+        receipt_bytes32 = self._normalize_bytes32(receipt_hash)
+        encoded_bool = self._encode_uint256(1 if validation_result else 0)
+        payloads = [
+            self._encode_call(
+                "postValidation(uint256,bytes32,bool)",
+                [self._encode_uint256(agent_id), self._encode_bytes32(receipt_bytes32), encoded_bool],
+            ),
+            self._encode_call(
+                "recordValidation(uint256,bytes32,bool)",
+                [self._encode_uint256(agent_id), self._encode_bytes32(receipt_bytes32), encoded_bool],
+            ),
+        ]
+
+        last_error: Optional[Exception] = None
+        for payload in payloads:
+            try:
+                tx_hash = self._send_transaction(contract, payload, private_key)
+                return {
+                    "tx_hash": tx_hash,
+                    "agent_id": int(agent_id),
+                    "validation_registry": contract,
+                    "receipt_hash": receipt_bytes32,
+                    "validation_result": bool(validation_result),
+                }
+            except Exception as exc:  # pragma: no cover - network/write path
+                last_error = exc
+
+        raise ERC8004Error(f"Failed to submit validation transaction: {last_error}")
+
+    def _discover_registry_addresses(self, *, agent_id: int, wallet: str) -> RegistryAddresses:
+        if self._registry_cache is not None:
+            return self._registry_cache
+
+        receipt = self._rpc("eth_getTransactionReceipt", [self.registration_tx_hash])
+        if not isinstance(receipt, dict):
+            raise ERC8004Error("Could not load registration transaction receipt from Base RPC")
+
+        logs = receipt.get("logs", [])
+        ordered_addresses: List[str] = []
+
+        tx_to = receipt.get("to")
+        if isinstance(tx_to, str) and tx_to:
+            ordered_addresses.append(self._normalize_address(tx_to))
+
+        for log in logs:
+            address = self._normalize_address(log.get("address", ""))
+            if address and address not in ordered_addresses:
+                ordered_addresses.append(address)
+
+        identity_registry = self._find_identity_registry(logs, agent_id, wallet)
+
+        remaining = [addr for addr in ordered_addresses if addr and addr != identity_registry]
+        reputation_registry = self._normalize_env_address(os.getenv("ERC8004_REPUTATION_REGISTRY"))
+        validation_registry = self._normalize_env_address(os.getenv("ERC8004_VALIDATION_REGISTRY"))
+
+        if not reputation_registry and remaining:
+            reputation_registry = remaining[0]
+        if not validation_registry and len(remaining) > 1:
+            validation_registry = remaining[1]
+
+        block_number = self._from_hex(receipt.get("blockNumber"))
+
+        self._registry_cache = RegistryAddresses(
+            identity_registry=identity_registry,
+            reputation_registry=reputation_registry,
+            validation_registry=validation_registry,
+            registration_block=block_number,
+            registration_tx_hash=self.registration_tx_hash,
+        )
+        return self._registry_cache
+
+    def _find_identity_registry(self, logs: Any, agent_id: int, wallet: str) -> Optional[str]:
+        target_topic = self._topic_uint256(agent_id)
+        wallet_topic = self._topic_address(wallet)
+
+        if isinstance(logs, list):
+            for log in logs:
+                topics = log.get("topics", [])
+                if not isinstance(topics, list) or len(topics) < 4:
+                    continue
+                if str(topics[0]).lower() != TRANSFER_TOPIC:
+                    continue
+                if str(topics[2]).lower() != wallet_topic:
+                    continue
+                if str(topics[3]).lower() != target_topic:
+                    continue
+                return self._normalize_address(log.get("address", ""))
+
+        return self._normalize_env_address(os.getenv("ERC8004_IDENTITY_REGISTRY"))
+
+    def _read_reputation_summary(self, contract: str, agent_id: int) -> Dict[str, Any]:
+        candidates = {
+            "reputationOf(uint256)": "reputation_of",
+            "getReputation(uint256)": "get_reputation",
+            "getAgentReputation(uint256)": "get_agent_reputation",
+            "scoreOf(uint256)": "score_of",
+        }
+        summary: Dict[str, Any] = {}
+        for signature, label in candidates.items():
+            try:
+                raw = self._eth_call(contract, self._encode_call(signature, [self._encode_uint256(agent_id)]))
+                summary[label] = self._decode_uint256(raw)
+            except ERC8004Error:
+                continue
+        return summary
+
+    def _eth_get_logs(self, *, address: str, topics: List[Optional[str]], from_block: str) -> List[Dict[str, Any]]:
+        params = {
+            "address": address,
+            "fromBlock": from_block,
+            "toBlock": "latest",
+            "topics": topics,
+        }
+        result = self._rpc("eth_getLogs", [params])
+        return result if isinstance(result, list) else []
+
+    def _eth_call(self, to: str, data: str) -> str:
+        result = self._rpc("eth_call", [{"to": to, "data": data}, "latest"])
+        if not isinstance(result, str):
+            raise ERC8004Error("Invalid eth_call response")
+        if result == "0x":
+            raise ERC8004Error("Empty eth_call response")
+        return result
+
+    def _rpc(self, method: str, params: List[Any]) -> Any:
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        body = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.rpc_url,
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=15) as response:
+                raw = response.read().decode("utf-8")
+        except URLError as exc:
+            raise ERC8004Error(f"Base RPC request failed: {exc}") from exc
+
+        decoded = json.loads(raw)
+        if "error" in decoded:
+            raise ERC8004Error(f"Base RPC error for {method}: {decoded['error']}")
+        return decoded.get("result")
+
+    def _send_transaction(self, to: str, data: str, private_key: str) -> str:
+        try:
+            from web3 import Web3
+        except ImportError as exc:  # pragma: no cover - optional dependency path
+            raise ERC8004Error("web3 is required for write operations. Install with: pip install 'nexus-ledger[erc8004]'") from exc
+
+        web3 = Web3(Web3.HTTPProvider(self.rpc_url))
+        account = web3.eth.account.from_key(private_key)
+
+        tx = {
+            "chainId": 8453,
+            "to": Web3.to_checksum_address(to),
+            "from": account.address,
+            "nonce": web3.eth.get_transaction_count(account.address),
+            "value": 0,
+            "data": data,
+            "gasPrice": web3.eth.gas_price,
+        }
+        tx["gas"] = web3.eth.estimate_gas(tx)
+
+        signed = account.sign_transaction(tx)
+        tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+        return tx_hash.hex()
+
+    def _fetch_metadata(self, token_uri: str) -> Optional[Dict[str, Any]]:
+        uri = str(token_uri).strip()
+        if not uri:
+            return None
+
+        if uri.startswith("ipfs://"):
+            uri = "https://ipfs.io/ipfs/" + uri[len("ipfs://") :]
+
+        if not (uri.startswith("http://") or uri.startswith("https://")):
+            return None
+
+        req = request.Request(uri, headers={"Accept": "application/json"}, method="GET")
+        try:
+            with request.urlopen(req, timeout=10) as response:
+                payload = response.read().decode("utf-8")
+        except Exception:
+            return None
+
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
+    def _normalize_log(self, log: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "address": self._normalize_address(log.get("address", "")),
+            "block_number": self._from_hex(log.get("blockNumber")),
+            "tx_hash": log.get("transactionHash"),
+            "log_index": self._from_hex(log.get("logIndex")),
+            "topics": log.get("topics", []),
+            "data": log.get("data"),
+        }
+
+    @staticmethod
+    def _to_hex(value: int) -> str:
+        return hex(int(value))
+
+    @staticmethod
+    def _from_hex(value: Any) -> Optional[int]:
+        if isinstance(value, str) and value.startswith("0x"):
+            return int(value, 16)
+        return None
+
+    @staticmethod
+    def _normalize_address(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("0x"):
+            return "0x" + text[2:].lower()
+        return "0x" + text.lower()
+
+    @staticmethod
+    def _normalize_env_address(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        addr = ERC8004._normalize_address(value)
+        return addr if len(addr) == 42 else None
+
+    @staticmethod
+    def _normalize_bytes32(value: str) -> str:
+        raw = str(value).strip().lower()
+        if raw.startswith("0x"):
+            raw = raw[2:]
+        if len(raw) == 64:
+            return "0x" + raw
+        raise ValueError("receipt_hash must be 32-byte hex")
+
+    @staticmethod
+    def _function_selector(signature: str) -> str:
+        if signature not in FUNCTION_SELECTORS:
+            raise ValueError(f"Unsupported function signature: {signature}")
+        return FUNCTION_SELECTORS[signature]
+
+    @classmethod
+    def _encode_call(cls, signature: str, args_encoded: List[str]) -> str:
+        selector = cls._function_selector(signature)
+        if not args_encoded:
+            return "0x" + selector
+
+        static_parts: List[str] = []
+        dynamic_parts: List[str] = []
+        offset = 32 * len(args_encoded)
+
+        for item in args_encoded:
+            if item.startswith("dynamic:"):
+                encoded = item[len("dynamic:") :]
+                static_parts.append(cls._encode_uint256_raw(offset))
+                dynamic_parts.append(encoded)
+                offset += len(encoded) // 2
+            else:
+                static_parts.append(item)
+
+        return "0x" + selector + "".join(static_parts) + "".join(dynamic_parts)
+
+    @staticmethod
+    def _encode_uint256(value: int) -> str:
+        return ERC8004._encode_uint256_raw(int(value))
+
+    @staticmethod
+    def _encode_uint256_raw(value: int) -> str:
+        return hex(int(value) & ((1 << 256) - 1))[2:].rjust(64, "0")
+
+    @staticmethod
+    def _encode_bytes32(value: str) -> str:
+        raw = value[2:] if value.startswith("0x") else value
+        if len(raw) != 64:
+            raise ValueError("bytes32 values must be 32-byte hex")
+        return raw.lower()
+
+    @staticmethod
+    def _encode_string(value: str) -> str:
+        raw = str(value).encode("utf-8")
+        padded_len = ((len(raw) + 31) // 32) * 32
+        padded = raw.ljust(padded_len, b"\x00").hex()
+        encoded = ERC8004._encode_uint256_raw(len(raw)) + padded
+        return "dynamic:" + encoded
+
+    @staticmethod
+    def _decode_uint256(value: str) -> int:
+        raw = value[2:] if value.startswith("0x") else value
+        if len(raw) < 64:
+            raise ERC8004Error("Invalid uint256 response length")
+        return int(raw[:64], 16)
+
+    @staticmethod
+    def _decode_address(value: str) -> str:
+        raw = value[2:] if value.startswith("0x") else value
+        if len(raw) < 64:
+            raise ERC8004Error("Invalid address response length")
+        return "0x" + raw[-40:].lower()
+
+    @staticmethod
+    def _decode_string(value: str) -> str:
+        raw = value[2:] if value.startswith("0x") else value
+        if len(raw) < 128:
+            raise ERC8004Error("Invalid ABI string response length")
+
+        offset = int(raw[:64], 16)
+        start = offset * 2
+        if len(raw) < start + 64:
+            raise ERC8004Error("Invalid ABI string offset")
+
+        length = int(raw[start : start + 64], 16)
+        data_start = start + 64
+        data_end = data_start + (length * 2)
+        if len(raw) < data_end:
+            raise ERC8004Error("Invalid ABI string data length")
+
+        return bytes.fromhex(raw[data_start:data_end]).decode("utf-8")
+
+    @staticmethod
+    def _topic_uint256(value: int) -> str:
+        return "0x" + ERC8004._encode_uint256_raw(value)
+
+    @staticmethod
+    def _topic_address(address: str) -> str:
+        clean = address[2:] if address.startswith("0x") else address
+        return "0x" + clean.lower().rjust(64, "0")
+
+
+_default_client: Optional[ERC8004] = None
+
+
+def _client() -> ERC8004:
+    global _default_client
+    if _default_client is None:
+        _default_client = ERC8004()
+    return _default_client
+
+
+def get_agent_identity(agent_id: int) -> Dict[str, Any]:
+    return _client().get_agent_identity(agent_id)
+
+
+def post_reputation(agent_id: int, receipt_hash: str, rating: int, comment: str) -> Dict[str, Any]:
+    return _client().post_reputation(agent_id, receipt_hash, rating, comment)
+
+
+def get_reputation(agent_id: int) -> Dict[str, Any]:
+    return _client().get_reputation(agent_id)
+
+
+def post_validation(agent_id: int, receipt_hash: str, validation_result: bool) -> Dict[str, Any]:
+    return _client().post_validation(agent_id, receipt_hash, validation_result)
+
+========== nexus_ledger/ws_transport.py ==========
+"""Live relay transport using WebSocket with polling fallback."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+import time
+from typing import Any, Callable, List, Optional
+from urllib.parse import quote
+
+from .relay_manager import RelayManager
+
+
+class LiveConnection:
+    def __init__(
+        self,
+        *,
+        did: str,
+        relay_manager: RelayManager,
+        on_ws_message: Callable[[dict[str, Any]], None],
+        poll_once: Callable[[], None],
+        poll_interval_seconds: float = 1.0,
+    ) -> None:
+        self.did = did
+        self.relay_manager = relay_manager
+        self.on_ws_message = on_ws_message
+        self.poll_once = poll_once
+        self.poll_interval_seconds = float(poll_interval_seconds)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+
+        if self._can_use_websocket():
+            self._thread = threading.Thread(target=self._run_ws_loop, daemon=True)
+        else:
+            self._thread = threading.Thread(target=self._run_poll_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def _can_use_websocket(self) -> bool:
+        try:
+            import websockets  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def _relay_ws_urls(self) -> List[str]:
+        urls: List[str] = []
+        for relay in self.relay_manager.relays:
+            base = relay.rstrip("/")
+            if base.startswith("https://"):
+                ws_base = "wss://" + base[len("https://") :]
+            elif base.startswith("http://"):
+                ws_base = "ws://" + base[len("http://") :]
+            else:
+                continue
+            urls.append(f"{ws_base}/ws?did={quote(self.did)}")
+        return urls
+
+    def _run_ws_loop(self) -> None:
+        asyncio.run(self._ws_loop())
+
+    async def _ws_loop(self) -> None:
+        import websockets
+
+        urls = self._relay_ws_urls()
+        while not self._stop.is_set():
+            connected = False
+            for ws_url in urls:
+                if self._stop.is_set():
+                    return
+                try:
+                    async with websockets.connect(ws_url, ping_interval=20, close_timeout=2) as conn:
+                        connected = True
+                        while not self._stop.is_set():
+                            raw = await asyncio.wait_for(conn.recv(), timeout=1.0)
+                            message = json.loads(raw)
+                            if isinstance(message, dict):
+                                self.on_ws_message(message)
+                except Exception:
+                    continue
+
+            if not connected:
+                self.poll_once()
+                await asyncio.sleep(self.poll_interval_seconds)
+
+    def _run_poll_loop(self) -> None:
+        while not self._stop.is_set():
+            self.poll_once()
+            time.sleep(self.poll_interval_seconds)
+
+========== nexus_ledger/cli.py ==========
+"""Command-line interface for Nexus Ledger."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from typing import Any
+
+from .agent import Agent, verify_receipt_dict
+from .relay_manager import DEFAULT_RELAYS
+
+
+def _build_agent(args: argparse.Namespace) -> Agent:
+    relays = args.relays if getattr(args, "relays", None) else list(DEFAULT_RELAYS)
+    return Agent(
+        args.name,
+        keys_dir=args.keys_dir,
+        db_path=args.db_path,
+        relays=relays,
+    )
+
+
+def _print(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    _print({"name": agent.name, "did": agent.did, "public_key": agent.public_key, "relays": agent.relays})
+    return 0
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    data = json.loads(args.data_json)
+    receipt = agent.send(args.event, data, to=args.to, encrypted=args.encrypted)
+    _print(receipt)
+    return 0
+
+
+def cmd_inbox(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    receipts = agent.check_inbox()
+    _print(receipts)
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    _print(agent.history())
+    return 0
+
+
+def cmd_agents(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    _print(agent.online_agents())
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    receipt = json.loads(args.receipt_json)
+    ok = verify_receipt_dict(receipt) if isinstance(receipt, dict) else False
+    _print({"valid": bool(ok)})
+    return 0 if ok else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="nexus-ledger")
+    parser.add_argument("--name", default="Mercury")
+    parser.add_argument("--keys-dir", default="keys")
+    parser.add_argument("--db-path", default="nexus.db")
+    parser.add_argument("--relays", nargs="*", default=list(DEFAULT_RELAYS))
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_cmd = subparsers.add_parser("init", help="create or load local agent identity")
+    init_cmd.set_defaults(func=cmd_init)
+
+    send_cmd = subparsers.add_parser("send", help="send a receipt")
+    send_cmd.add_argument("to")
+    send_cmd.add_argument("event")
+    send_cmd.add_argument("data_json")
+    send_cmd.add_argument("--encrypted", action="store_true")
+    send_cmd.set_defaults(func=cmd_send)
+
+    inbox_cmd = subparsers.add_parser("inbox", help="check incoming receipts")
+    inbox_cmd.set_defaults(func=cmd_inbox)
+
+    history_cmd = subparsers.add_parser("history", help="show local activity log")
+    history_cmd.set_defaults(func=cmd_history)
+
+    agents_cmd = subparsers.add_parser("agents", help="list online agents on relay")
+    agents_cmd.set_defaults(func=cmd_agents)
+
+    verify_cmd = subparsers.add_parser("verify", help="verify receipt signatures")
+    verify_cmd.add_argument("receipt_json")
+    verify_cmd.set_defaults(func=cmd_verify)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+========== test_nexus.py ==========
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import MethodType
+from typing import Any, Dict
+
+from nexus_ledger import Agent
+from nexus_ledger.agent import verify_receipt_dict
+from nexus_ledger.cli import build_parser
+from nexus_ledger.ledger import Ledger
+from nexus_ledger.protocol import generate_keypair
+from nexus_ledger.relay_manager import RelayManager
+from nexus_ledger.receipt_types import TaskConfirmed
+
+
+class InMemoryRelay:
+    def __init__(self) -> None:
+        self._agents: Dict[str, Dict[str, str]] = {}
+        self._inbox: Dict[str, list[Dict[str, Any]]] = {}
+
+    def handle(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Any:
+        route = str(path).split("?", 1)[0]
+        method = method.upper()
+        params = params or {}
+        payload = payload or {}
+
+        if route == "/health":
+            return {"status": "ok"}
+
+        if route == "/register" and method == "POST":
+            did = str(payload["did"])
+            self._agents[did] = {
+                "did": did,
+                "name": str(payload["name"]),
+                "pubkey": str(payload["pubkey"]),
+            }
+            self._inbox.setdefault(did, [])
+            return {"ok": True}
+
+        if route == "/discover":
+            name = str(params.get("name", "")).strip().lower()
+            agents = list(self._agents.values())
+            if name:
+                agents = [agent for agent in agents if agent["name"].strip().lower() == name]
+            return {"agents": agents}
+
+        if route == "/send" and method == "POST":
+            to_did = str(payload["to"])
+            self._inbox.setdefault(to_did, []).append({"envelope": payload["envelope"]})
+            return {"queued": True}
+
+        if route == "/receive":
+            did = str(params.get("did", ""))
+            messages = self._inbox.get(did, [])
+            self._inbox[did] = []
+            return {"messages": messages}
+
+        raise RuntimeError(f"Unsupported relay route: {route} {method}")
+
+
+def attach_relay(agent: Agent, relay: InMemoryRelay) -> None:
+    def _relay_request(
+        self: Agent,
+        path: str,
+        *,
+        method: str = "GET",
+        params: Dict[str, Any] | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> Any:
+        return relay.handle(path, method=method, params=params, payload=payload)
+
+    agent._relay_request = MethodType(_relay_request, agent)  # type: ignore[attr-defined]
+    agent._relay_available = True  # type: ignore[attr-defined]
+    agent._relay_request(  # type: ignore[attr-defined]
+        "/register",
+        method="POST",
+        payload={"did": agent.did, "name": agent.name, "pubkey": agent.public_key},
+    )
+
+
+def test_agent_creation(tmp_path: Path) -> None:
+    agent = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "agent.db"), relay="memory://relay")
+    assert agent.name == "Mercury"
+    assert len(agent.private_key) == 64
+    assert len(agent.public_key) == 64
+    assert agent.did.startswith("did:key:z")
+    assert len(agent.relays) >= 2
+
+
+def test_receipt_create_countersign_verify_with_parent_hash(tmp_path: Path) -> None:
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
+
+    draft = mercury.create_receipt("TaskRequest", {"task_id": "T-1"}, iris.public_key)
+    final = iris.countersign_receipt(draft)
+
+    assert draft["parent_receipt_hash"] == ""
+    assert mercury.verify_receipt(final) is True
+    assert iris.verify_receipt(final) is True
+
+
+def test_relay_task_chain_flow(tmp_path: Path) -> None:
+    relay = InMemoryRelay()
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys_a"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys_b"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
+    attach_relay(mercury, relay)
+    attach_relay(iris, relay)
+
+    request = mercury.request_task("Iris", description="market research", budget=100, task_id="T-3")
+    iris.check_inbox()
+    accept = iris.accept_task("Mercury", task_id="T-3", estimated_delivery="2026-03-22T12:00:00+00:00")
+    mercury.check_inbox()
+    deliver = iris.deliver_task("T-3", artifact_hash="sha256:abc", to="Mercury")
+    mercury.check_inbox()
+    confirm = mercury.confirm_task("T-3", rating=5, feedback="excellent", to="Iris")
+    iris.check_inbox()
+    mercury.check_inbox()
+
+    chain = mercury.get_task_chain("T-3")
+    assert len(chain) >= 4
+    assert request["parent_receipt_hash"] == ""
+    assert accept["parent_receipt_hash"] != ""
+    assert deliver["parent_receipt_hash"] != ""
+    assert confirm["parent_receipt_hash"] != ""
+
+
+def test_encrypted_receipt_round_trip(tmp_path: Path) -> None:
+    relay = InMemoryRelay()
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys_a"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys_b"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
+    attach_relay(mercury, relay)
+    attach_relay(iris, relay)
+
+    mercury.send("TaskRequest", {"task_id": "enc-1", "description": "x", "budget": 1, "deadline": "2026-03-22T12:00:00+00:00"}, to="Iris", encrypted=True)
+    iris_inbox = iris.check_inbox()
+    mercury_inbox = mercury.check_inbox()
+
+    assert len(iris_inbox) == 1
+    assert len(mercury_inbox) == 1
+    assert verify_receipt_dict(mercury_inbox[0]) is True
+
+
+def test_live_callback_receives_processed_receipts(tmp_path: Path) -> None:
+    relay = InMemoryRelay()
+    mercury = Agent("Mercury", keys_dir=str(tmp_path / "keys_a"), db_path=str(tmp_path / "mercury.db"), relay="memory://relay")
+    iris = Agent("Iris", keys_dir=str(tmp_path / "keys_b"), db_path=str(tmp_path / "iris.db"), relay="memory://relay")
+    attach_relay(mercury, relay)
+    attach_relay(iris, relay)
+
+    seen: list[Dict[str, Any]] = []
+    mercury.on_receipt(lambda receipt: seen.append(receipt))
+
+    iris.send("TaskRequest", {"task_id": "cb-1", "description": "x", "budget": 1, "deadline": "2026-03-22T12:00:00+00:00"}, to="Mercury")
+    mercury.check_inbox()
+
+    assert len(seen) >= 1
+
+
+def test_trust_score_and_report(tmp_path: Path) -> None:
+    ledger = Ledger(path=str(tmp_path / "trust.db"))
+    alice = generate_keypair()
+    bob = generate_keypair()
+
+    receipt = {
+        "timestamp": "2026-03-21T20:00:00+00:00",
+        "event_type": "TaskConfirmed",
+        "data": TaskConfirmed(task_id="t-1", rating=5, feedback="great").as_data(),
+        "parent_receipt_hash": "",
+        "agent_a_pubkey": alice[1],
+        "agent_a_signature": "00",
+        "agent_b_pubkey": bob[1],
+        "agent_b_signature": "00",
+    }
+
+    # Store a syntactically valid row for trust scoring purposes.
+    ledger._conn.execute(
+        """
+        INSERT INTO receipts (
+            timestamp, event_type, data_json, task_id, parent_receipt_hash,
+            agent_a_pubkey, agent_a_signature, agent_b_pubkey, agent_b_signature, proof_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            receipt["timestamp"],
+            receipt["event_type"],
+            json.dumps(receipt["data"], sort_keys=True),
+            "t-1",
+            "",
+            receipt["agent_a_pubkey"],
+            receipt["agent_a_signature"],
+            receipt["agent_b_pubkey"],
+            receipt["agent_b_signature"],
+            "proof",
+        ),
+    )
+    ledger._conn.commit()
+
+    agent = Agent("Mercury", keys_dir=str(tmp_path / "keys"), db_path=str(tmp_path / "trust.db"), relay="memory://relay")
+    report = agent.get_trust_report(alice[1])
+    assert 0.0 <= report["score"] <= 1.0
+    assert report["factors"]["total_receipts"] >= 1
+
+
+def test_cli_parser_commands() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["init"])
+    assert args.command == "init"
+
+    args = parser.parse_args(["send", "Iris", "TaskRequest", '{"task_id":"t1","description":"x","budget":1,"deadline":"2026-03-22T12:00:00+00:00"}'])
+    assert args.command == "send"
+
+    args = parser.parse_args(["verify", '{"event_type":"TaskConfirmed"}'])
+    assert args.command == "verify"
+
+
+def test_relay_manager_failover_order() -> None:
+    manager = RelayManager(["http://primary:8765", "http://secondary:8765"])
+
+    calls: list[str] = []
+
+    def fake_request(relay: str, path: str, *, method: str = "GET", params: Dict[str, Any] | None = None, payload: Dict[str, Any] | None = None) -> Any:
+        calls.append(relay)
+        if "primary" in relay:
+            raise RuntimeError("down")
+        return {"ok": True}
+
+    manager._request_to_relay = fake_request  # type: ignore[assignment]
+    result = manager.request("/health")
+
+    assert result == {"ok": True}
+    assert calls == ["http://primary:8765", "http://secondary:8765"]
+

@@ -34,6 +34,87 @@ pip install nexus-ledger
 | Externally managed environment | `python3 -m pip install nexus-ledger --user` |
 | Need isolated env | `python3 -m venv .venv && source .venv/bin/activate && pip install nexus-ledger` |
 
+## Supply Chain Trust (v5.0)
+
+> 100 million downloads compromised. Zero verification. One npm publish turned the most trusted HTTP client into malware. Nexus Ledger v5.0 fixes this.
+
+Every `npm install`, `pip install`, or `cargo add` can now produce a **cryptographic receipt** — a signed record of what was installed, when, and whether the downloaded artifact matched the registry-published hash.
+
+### Quick Example
+
+```python
+import hashlib
+from nexus_ledger import Agent
+
+agent = Agent("builder")
+
+# Compute the SHA-256 of the downloaded tarball
+source_hash = "sha256:" + hashlib.sha256(downloaded_bytes).hexdigest()
+
+# The hash the registry says it should be
+expected_hash = "sha256:abc123..."
+
+# Record the installation — returns SAFE or ALERT receipt
+receipt = agent.record_dependency(
+    package="axios",
+    version="1.7.2",
+    registry="npm",
+    source_hash=source_hash,
+    expected_hash=expected_hash,
+    install_command="npm install axios@1.7.2",
+)
+
+print(receipt["data"]["hash_match"])  # True = SAFE, False = ALERT
+
+# Verify a previously recorded dependency
+is_safe = agent.verify_dependency("axios", "1.7.2")
+
+# Full audit trail of all installed dependencies
+audit = agent.dependency_audit()
+```
+
+### Detection Scenarios
+
+| Scenario | What Nexus Catches |
+|---|---|
+| **axios attack** | Hash of 1.14.1 doesn't match registry — ALERT |
+| **Version injection** | 0.30.4 published after 1.7.2 — temporal anomaly — FLAG |
+| **Typosquatting** | `axois` has no prior receipts — UNKNOWN |
+| **Cross-agent trust** | Agent B verifies against Agent A's signed receipt |
+
+### CLI
+
+```bash
+# Verify a specific package version
+nexus-ledger verify-dep --package axios --version 1.14.1 --registry npm
+# Returns: {"status": "SAFE"} or {"status": "ALERT"}
+
+# Full dependency audit trail
+nexus-ledger audit-deps
+```
+
+### Cross-Agent Verification
+
+```python
+# Agent B queries Agent A's ledger to cross-verify a package
+receipt = agent_b._supply_chain.query_dependency_from_agent(
+    other_ledger=agent_a._ledger,
+    other_pubkey=agent_a.public_key,
+    package="axios",
+    version="1.7.2",
+)
+# Returns Agent A's signed receipt — hash_match: True = safe, False = ALERT
+```
+
+### Temporal Anomaly Detection
+
+Detects version injection attacks where an older version is published retroactively after a newer one already exists — exactly how the axios attack would have been caught.
+
+```python
+result = agent._supply_chain.detect_temporal_anomaly("axios", "0.30.4")
+# result["anomaly"] == True if 0.30.4 appeared after 1.7.2 was already recorded
+```
+
 ## Quickstart
 
 ```python
