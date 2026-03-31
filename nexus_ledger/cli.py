@@ -64,27 +64,34 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def cmd_verify_dep(args: argparse.Namespace) -> int:
-    """Verify a package dependency against recorded receipts."""
+def cmd_trust(args: argparse.Namespace) -> int:
     agent = _build_agent(args)
-    against = getattr(args, "against", "registry") or "registry"
-    ok = agent.verify_dependency(args.package, args.version, against=against)
-    status = "SAFE" if ok else "ALERT"
-    _print({
-        "status": status,
-        "package": args.package,
-        "version": args.version,
-        "registry": getattr(args, "registry", ""),
-        "verified": ok,
-    })
-    return 0 if ok else 1
+    target = args.target or agent.public_key
+    report = agent.get_trust_report(target)
+    _print(report)
+    return 0
 
 
-def cmd_audit_deps(args: argparse.Namespace) -> int:
-    """List all dependency installation receipts."""
+def cmd_task_chain(args: argparse.Namespace) -> int:
     agent = _build_agent(args)
-    receipts = agent.dependency_audit()
-    _print(receipts)
+    chain = agent.get_task_chain(args.task_id)
+    _print(chain)
+    return 0
+
+
+def cmd_anchor(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    chain = args.chain or "base"
+    result = agent.anchor_to_eth(chain=chain)
+    _print(result)
+    return 0
+
+
+def cmd_anchor_all(args: argparse.Namespace) -> int:
+    agent = _build_agent(args)
+    chain = args.chain or "base"
+    result = agent.anchor_all_to_eth(chain=chain)
+    _print(result)
     return 0
 
 
@@ -120,26 +127,21 @@ def build_parser() -> argparse.ArgumentParser:
     verify_cmd.add_argument("receipt_json")
     verify_cmd.set_defaults(func=cmd_verify)
 
-    # Supply Chain Trust commands (v5.0)
-    verify_dep_cmd = subparsers.add_parser(
-        "verify-dep",
-        help="verify a package dependency hash against recorded receipts",
-    )
-    verify_dep_cmd.add_argument("--package", required=True, help="Package name (e.g., axios)")
-    verify_dep_cmd.add_argument("--version", required=True, help="Package version (e.g., 1.14.1)")
-    verify_dep_cmd.add_argument("--registry", default="", help="Registry name (e.g., npm, pypi)")
-    verify_dep_cmd.add_argument(
-        "--against",
-        default="registry",
-        help="Verification mode: 'registry' (default) or a specific hash",
-    )
-    verify_dep_cmd.set_defaults(func=cmd_verify_dep)
+    trust_cmd = subparsers.add_parser("trust", help="show trust score and report")
+    trust_cmd.add_argument("--target", default=None, help="agent public key (default: self)")
+    trust_cmd.set_defaults(func=cmd_trust)
 
-    audit_deps_cmd = subparsers.add_parser(
-        "audit-deps",
-        help="list all recorded dependency installation receipts",
-    )
-    audit_deps_cmd.set_defaults(func=cmd_audit_deps)
+    chain_cmd = subparsers.add_parser("task-chain", help="show receipt chain for a task")
+    chain_cmd.add_argument("task_id")
+    chain_cmd.set_defaults(func=cmd_task_chain)
+
+    anchor_cmd = subparsers.add_parser("anchor", help="anchor latest receipt to Ethereum/Base/Sepolia")
+    anchor_cmd.add_argument("--chain", default="base", choices=["base", "ethereum", "sepolia"], help="target chain")
+    anchor_cmd.set_defaults(func=cmd_anchor)
+
+    anchor_all_cmd = subparsers.add_parser("anchor-all", help="batch-anchor all receipts to chain")
+    anchor_all_cmd.add_argument("--chain", default="base", choices=["base", "ethereum", "sepolia"], help="target chain")
+    anchor_all_cmd.set_defaults(func=cmd_anchor_all)
 
     return parser
 

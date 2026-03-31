@@ -72,6 +72,8 @@ class LiveConnection:
         import websockets
 
         urls = self._relay_ws_urls()
+        backoff_seconds = 1.0
+        max_backoff = 60.0
         while not self._stop.is_set():
             connected = False
             for ws_url in urls:
@@ -80,6 +82,7 @@ class LiveConnection:
                 try:
                     async with websockets.connect(ws_url, ping_interval=20, close_timeout=2) as conn:
                         connected = True
+                        backoff_seconds = 1.0
                         while not self._stop.is_set():
                             raw = await asyncio.wait_for(conn.recv(), timeout=1.0)
                             message = json.loads(raw)
@@ -90,7 +93,9 @@ class LiveConnection:
 
             if not connected:
                 self.poll_once()
-                await asyncio.sleep(self.poll_interval_seconds)
+                print(f"[LiveConnection] reconnecting in {backoff_seconds:.0f}s")
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2.0, max_backoff)
 
     def _run_poll_loop(self) -> None:
         while not self._stop.is_set():

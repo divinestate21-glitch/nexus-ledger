@@ -9,12 +9,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib import request
 from urllib.error import URLError
 
-BASE_MAINNET_RPC = "https://mainnet.base.org"
-REGISTRATION_TX_HASH = "0xb80ee780354286184c5d68b94c68c95c35a9786068b325b78d7eea4a622e907f"
-HACKATHON_AGENT_ID = 35281
-HACKATHON_WALLET = "0xbbFb4Df7450FAB448e6bd2a138D0C241834848f9"
+import os
 
-TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55aeb36f6fd3"
+BASE_MAINNET_RPC = os.getenv("NEXUS_BASE_RPC", "https://mainnet.base.org")
+REGISTRATION_TX_HASH = os.getenv("NEXUS_REGISTRATION_TX", "0xb80ee780354286184c5d68b94c68c95c35a9786068b325b78d7eea4a622e907f")
+HACKATHON_AGENT_ID = int(os.getenv("NEXUS_AGENT_ID", "35281"))
+HACKATHON_WALLET = os.getenv("NEXUS_WALLET", "0xbbFb4Df7450FAB448e6bd2a138D0C241834848f9")
+
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 FUNCTION_SELECTORS = {
     "name()": "06fdde03",
     "symbol()": "95d89b41",

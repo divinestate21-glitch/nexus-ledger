@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexus-ledger"
-version = "4.0.0"
+version = "4.2.2"
 description = "Pure sign + log + anchor library for agent proof"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
   "pynacl>=1.5.0",
 ]
@@ -28,6 +28,10 @@ transport = [
 
 erc8004 = [
   "web3>=7.0.0",
+]
+
+ethereum = [
+  "eth-account>=0.11.0",
 ]
 
 test = [

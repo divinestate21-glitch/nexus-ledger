@@ -20,8 +20,8 @@ from .proof_anchor import anchor as anchor_proof
 from .proof_anchor import verify as verify_proof
 from .protocol import generate_keypair, sign, verify
 from .receipt_types import TaskAccepted, TaskConfirmed, TaskDelivered, TaskDisputed, TaskRequest, new_task_id
-from .supply_chain import SupplyChainModule
-from .relay_manager import DEFAULT_RELAYS, RelayManager
+from .relay_manager import DEFAULT_RELAYS
+from .relay_client import RelayClient
 from .transport import (
     HTTPTransport,
     pack_receipt,
@@ -32,6 +32,7 @@ from .transport import (
     unpack_receipt,
 )
 from .trust import TrustScorer
+from .task_manager import TaskManager
 from .ws_transport import LiveConnection
 
 
@@ -89,7 +90,7 @@ class Agent:
         configured_relays = self._normalize_relays(relay=relay, relays=relays)
         self.relays = configured_relays
         self.relay = configured_relays[0]
-        self._relay_manager = RelayManager(configured_relays, timeout_seconds=0.75)
+        self._relay_client = RelayClient(configured_relays, timeout_seconds=0.75)
 
         self.erc8004_agent_id = int(erc8004_agent_id)
         self.erc8004_wallet = str(erc8004_wallet).strip() or HACKATHON_WALLET
@@ -103,7 +104,7 @@ class Agent:
         self._receipt_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         self._live_connection: Optional[LiveConnection] = None
         self._trust = TrustScorer()
-        self._supply_chain = SupplyChainModule(self._ledger, self.public_key)
+        self._task_manager = TaskManager(ledger=self._ledger, relay=self, identity=self)
         self._register_on_relay_safely()
 
     @staticmethod
@@ -172,7 +173,12 @@ class Agent:
         return self._erc8004.get_reputation(self.erc8004_agent_id)
 
     def history(self) -> list[Dict[str, Any]]:
-        return self._ledger.by_agent(self.public_key)
+        """Return all activity — ledger entries + stored receipts."""
+        ledger_items = self._ledger.by_agent(self.public_key)
+        receipts = self._ledger.get_receipts()
+        # Combine and deduplicate
+        all_items = ledger_items + receipts
+        return all_items
 
     def all_activity(self) -> list[Dict[str, Any]]:
         return self._ledger.all()
@@ -183,20 +189,10 @@ class Agent:
 
     @property
     def relay_online(self) -> bool:
-        return self._relay_available
+        return self._relay_available or self._relay_client.relay_online
 
     def _register_on_relay_safely(self) -> None:
-        attempts = self._relay_request_all(
-            "/register",
-            method="POST",
-            payload={"did": self.did, "name": self.name, "pubkey": self.public_key},
-        )
-        if attempts:
-            self._relay_available = True
-            return
-
-        checks = self._relay_request_all("/health")
-        self._relay_available = bool(checks)
+        self._relay_client.register_on_relay(self.did, self.name, self.public_key)
 
     def _relay_request(
         self,
@@ -207,12 +203,10 @@ class Agent:
         payload: Optional[Dict[str, Any]] = None,
     ) -> Any:
         try:
-            response = self._relay_manager.request(path, method=method, params=params, payload=payload)
-            self.relay = self._relay_manager.active_relay
-            self._relay_available = True
+            response = self._relay_client._relay_request(path, method=method, params=params, payload=payload)
+            self.relay = self._relay_client.relay
             return response
         except Exception as exc:
-            self._relay_available = False
             raise RuntimeError(f"Relay request failed: {exc}") from exc
 
     def _relay_request_all(
@@ -223,19 +217,9 @@ class Agent:
         params: Optional[Dict[str, Any]] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
-        if "_relay_request" in self.__dict__:
-            try:
-                return [self._relay_request(path, method=method, params=params, payload=payload)]
-            except Exception:
-                return []
-
-        attempts = self._relay_manager.request_all(path, method=method, params=params, payload=payload)
-        successes = [attempt.response for attempt in attempts if attempt.ok]
+        successes = self._relay_client._relay_request_all(path, method=method, params=params, payload=payload)
         if successes:
-            self.relay = self._relay_manager.active_relay
-            self._relay_available = True
-        elif not attempts:
-            self._relay_available = False
+            self.relay = self._relay_client.relay
         return successes
 
     def _parse_discovery_response(self, payload: Any) -> Optional[Dict[str, Any]]:
@@ -295,7 +279,7 @@ class Agent:
         query = str(name).strip()
         if not query:
             raise ValueError("Agent name is required")
-        if not self._relay_available:
+        if not self.relay_online:
             return None
         try:
             payload = self._relay_request("/discover", params={"name": query})
@@ -304,7 +288,7 @@ class Agent:
         return self._parse_discovery_response(payload)
 
     def online_agents(self) -> list[Dict[str, Any]]:
-        if not self._relay_available:
+        if not self.relay_online:
             return []
         try:
             payload = self._relay_request("/discover")
@@ -366,7 +350,7 @@ class Agent:
     ) -> Dict[str, Any]:
         if not isinstance(data, dict):
             raise ValueError("data must be a dict")
-        if not self._relay_available:
+        if not self.relay_online:
             raise RuntimeError("Relay is unavailable; agent is running in local-only mode")
 
         target = str(to).strip()
@@ -391,6 +375,12 @@ class Agent:
         payload = self._wrap_for_transport(receipt, recipient_pubkey, encrypted=encrypted)
         envelope = json.loads(pack_receipt(payload, self.private_key))
         self._relay_request("/send", method="POST", payload={"to": recipient_did, "envelope": envelope})
+        # Store sender's copy (pending countersignature)
+        receipt_copy = dict(receipt)
+        receipt_copy.setdefault("parent_receipt_hash", "")
+        receipt_copy.setdefault("agent_b_signature", "")
+        receipt_copy["proof_hash"] = receipt_proof_hash(receipt_copy)
+        self._ledger.store_receipt(receipt_copy)
         return receipt
 
     def _process_envelope(self, envelope: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -466,7 +456,7 @@ class Agent:
         if self._live_connection is None:
             self._live_connection = LiveConnection(
                 did=self.did,
-                relay_manager=self._relay_manager,
+                relay_manager=self._relay_client.relay_manager,
                 on_ws_message=self._on_ws_message,
                 poll_once=self._poll_once,
                 poll_interval_seconds=1.0,
@@ -474,7 +464,7 @@ class Agent:
             self._live_connection.start()
 
     def check_inbox(self) -> list[Dict[str, Any]]:
-        if not self._relay_available:
+        if not self.relay_online:
             return []
 
         payloads = self._relay_request_all("/receive", params={"did": self.did})
@@ -640,43 +630,7 @@ class Agent:
         return self._listener_server
 
     def get_task_chain(self, task_id: str) -> List[Dict[str, Any]]:
-        rows = self._ledger.get_task_chain(task_id)
-        if not rows:
-            return []
-
-        parsed: List[Dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            try:
-                data = json.loads(str(item.get("data_json", "{}")))
-            except json.JSONDecodeError:
-                data = {}
-            item["data"] = data
-            parsed.append(item)
-
-        by_proof = {str(item.get("proof_hash", "")): item for item in parsed}
-        roots = [
-            item
-            for item in parsed
-            if not str(item.get("parent_receipt_hash", ""))
-            or str(item.get("parent_receipt_hash", "")) not in by_proof
-        ]
-
-        ordered: List[Dict[str, Any]] = []
-        current = roots[0] if roots else parsed[0]
-        remaining = {id(item): item for item in parsed}
-        while current and id(current) in remaining:
-            ordered.append(current)
-            remaining.pop(id(current), None)
-            next_item = None
-            for candidate in list(remaining.values()):
-                if str(candidate.get("parent_receipt_hash", "")) == str(current.get("proof_hash", "")):
-                    next_item = candidate
-                    break
-            current = next_item
-
-        ordered.extend(remaining.values())
-        return ordered
+        return self._task_manager.get_task_chain(task_id)
 
     def request_task(
         self,
@@ -688,14 +642,17 @@ class Agent:
         task_id: Optional[str] = None,
         encrypted: bool = False,
     ) -> Dict[str, Any]:
-        tid = str(task_id or new_task_id())
-        typed = TaskRequest(task_id=tid, description=description, budget=budget, deadline=deadline or datetime.now(timezone.utc).isoformat())
-        return self.send("TaskRequest", typed.as_data(), to=to, encrypted=encrypted)
+        return self._task_manager.request_task(
+            to,
+            description=description,
+            budget=budget,
+            deadline=deadline,
+            task_id=task_id,
+            encrypted=encrypted,
+        )
 
     def accept_task(self, to: str, *, task_id: str, estimated_delivery: str, encrypted: bool = False) -> Dict[str, Any]:
-        typed = TaskAccepted(task_id=task_id, estimated_delivery=estimated_delivery)
-        parent = self._latest_task_receipt_hash(task_id)
-        return self.send("TaskAccepted", typed.as_data(), to=to, encrypted=encrypted, parent_receipt_hash=parent)
+        return self._task_manager.accept_task(to, task_id=task_id, estimated_delivery=estimated_delivery, encrypted=encrypted)
 
     def deliver_task(
         self,
@@ -706,15 +663,13 @@ class Agent:
         to: Optional[str] = None,
         encrypted: bool = False,
     ) -> Dict[str, Any]:
-        typed = TaskDelivered(task_id=task_id, artifact_hash=artifact_hash, artifact_url=artifact_url)
-        counterparty = to
-        if not counterparty:
-            pubkey = self._resolve_task_counterparty_pubkey(task_id)
-            if not pubkey:
-                raise ValueError("Could not infer task counterparty; provide 'to'")
-            counterparty = public_key_to_did(pubkey)
-        parent = self._latest_task_receipt_hash(task_id)
-        return self.send("TaskDelivered", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+        return self._task_manager.deliver_task(
+            task_id,
+            artifact_hash=artifact_hash,
+            artifact_url=artifact_url,
+            to=to,
+            encrypted=encrypted,
+        )
 
     def confirm_task(
         self,
@@ -725,15 +680,13 @@ class Agent:
         to: Optional[str] = None,
         encrypted: bool = False,
     ) -> Dict[str, Any]:
-        typed = TaskConfirmed(task_id=task_id, rating=rating, feedback=feedback)
-        counterparty = to
-        if not counterparty:
-            pubkey = self._resolve_task_counterparty_pubkey(task_id)
-            if not pubkey:
-                raise ValueError("Could not infer task counterparty; provide 'to'")
-            counterparty = public_key_to_did(pubkey)
-        parent = self._latest_task_receipt_hash(task_id)
-        return self.send("TaskConfirmed", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+        return self._task_manager.confirm_task(
+            task_id,
+            rating=rating,
+            feedback=feedback,
+            to=to,
+            encrypted=encrypted,
+        )
 
     def dispute_task(
         self,
@@ -743,15 +696,13 @@ class Agent:
         to: Optional[str] = None,
         encrypted: bool = False,
     ) -> Dict[str, Any]:
-        typed = TaskDisputed(task_id=task_id, reason=reason)
-        counterparty = to
-        if not counterparty:
-            pubkey = self._resolve_task_counterparty_pubkey(task_id)
-            if not pubkey:
-                raise ValueError("Could not infer task counterparty; provide 'to'")
-            counterparty = public_key_to_did(pubkey)
-        parent = self._latest_task_receipt_hash(task_id)
-        return self.send("TaskDisputed", typed.as_data(), to=counterparty, encrypted=encrypted, parent_receipt_hash=parent)
+        return self._task_manager.dispute_task(task_id, reason=reason, to=to, encrypted=encrypted)
+
+    def _resolve_task_counterparty_pubkey(self, task_id: str) -> Optional[str]:
+        return self._task_manager._resolve_task_counterparty_pubkey(task_id)
+
+    def _latest_task_receipt_hash(self, task_id: str) -> str:
+        return self._task_manager._latest_task_receipt_hash(task_id)
 
     def trust_score(self) -> float:
         return float(self.get_trust_report(self.public_key)["score"])
@@ -760,70 +711,20 @@ class Agent:
         report = self._trust.build_report(agent_pubkey, self._ledger.get_receipts())
         return report
 
-    # ── Supply Chain Trust (v5.0) ──────────────────────────────────────────
+    def anchor_to_eth(self, receipt: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        """Anchor a receipt (or the latest receipt) to Ethereum/Base as immutable proof."""
+        from .eth_anchor import anchor_to_ethereum
+        if receipt is None:
+            receipts = self._ledger.get_receipts()
+            if not receipts:
+                raise ValueError("No receipts to anchor")
+            receipt = receipts[-1]
+        return anchor_to_ethereum(receipt, **kwargs)
 
-    def record_dependency(
-        self,
-        package: str,
-        version: str,
-        registry: str,
-        source_hash: str,
-        expected_hash: str,
-        install_command: Optional[str] = None,
-        environment: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Record a dependency installation with cryptographic proof.
-
-        Args:
-            package: Package name (e.g., "axios")
-            version: Package version (e.g., "1.7.2")
-            registry: Registry source (e.g., "npm", "pypi", "cargo")
-            source_hash: SHA-256 hash of the downloaded tarball/artifact
-            expected_hash: SHA-256 hash published by the registry
-            install_command: The install command used (optional)
-            environment: Environment description (optional)
-
-        Returns:
-            A receipt dict with all dependency installation details.
-            receipt["data"]["hash_match"] is True if the package is safe.
-        """
-        return self._supply_chain.record_dependency(
-            package=package,
-            version=version,
-            registry=registry,
-            source_hash=source_hash,
-            expected_hash=expected_hash,
-            install_command=install_command,
-            environment=environment,
-        )
-
-    def verify_dependency(
-        self,
-        package: str,
-        version: str,
-        against: str = "registry",
-    ) -> bool:
-        """Verify a previously recorded dependency.
-
-        Args:
-            package: Package name to look up
-            version: Package version to check
-            against: Verification mode — "registry" (default) checks stored
-                     hash_match; a hex hash string compares against that hash.
-
-        Returns:
-            True if the dependency is verified safe, False otherwise.
-        """
-        return self._supply_chain.verify_dependency(
-            package=package,
-            version=version,
-            against=against,
-        )
-
-    def dependency_audit(self) -> List[Dict[str, Any]]:
-        """Return all dependency installation receipts for this agent.
-
-        Returns:
-            List of receipt dicts for all recorded dependencies.
-        """
-        return self._supply_chain.dependency_audit()
+    def anchor_all_to_eth(self, **kwargs) -> Dict[str, Any]:
+        """Batch-anchor all receipts to Ethereum/Base in a single transaction."""
+        from .eth_anchor import batch_anchor
+        receipts = self._ledger.get_receipts()
+        if not receipts:
+            raise ValueError("No receipts to anchor")
+        return batch_anchor(receipts, **kwargs)

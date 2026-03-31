@@ -9,8 +9,9 @@ from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
 
-DEFAULT_PRIMARY_RELAY = "http://104.236.251.94:8765"
-DEFAULT_FALLBACK_RELAY = "http://localhost:8765"
+import os
+DEFAULT_PRIMARY_RELAY = os.getenv("NEXUS_RELAY_PRIMARY", "http://104.236.251.94:8765")
+DEFAULT_FALLBACK_RELAY = os.getenv("NEXUS_RELAY_FALLBACK", "http://localhost:8765")
 DEFAULT_RELAYS = [DEFAULT_PRIMARY_RELAY, DEFAULT_FALLBACK_RELAY]
 
 
