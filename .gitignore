@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.venv/
+*.db
+keys/
+.env
+graphify-out/
+.graphify_*
